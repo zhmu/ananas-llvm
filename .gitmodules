@@ -1,0 +1,9 @@
+[submodule "projects/libcxx"]
+	path = projects/libcxx
+	url = https://github.com/zhmu/ananas-libcxx.git
+[submodule "projects/libcxxabi"]
+	path = projects/libcxxabi
+	url = https://github.com/zhmu/ananas-libcxxabi.git
+[submodule "projects/libunwind"]
+	path = projects/libunwind
+	url = https://github.com/zhmu/ananas-libunwind.git
