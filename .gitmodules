@@ -7,3 +7,9 @@
 [submodule "projects/libunwind"]
 	path = projects/libunwind
 	url = https://github.com/zhmu/ananas-libunwind.git
+[submodule "tools/clang"]
+	path = tools/clang
+	url = https://github.com/zhmu/ananas-clang.git
+[submodule "tools/lld"]
+	path = tools/lld
+	url = https://github.com/zhmu/ananas-lld.git
