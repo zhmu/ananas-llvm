@@ -21,7 +21,6 @@
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineValueType.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/ValueTypes.h"
@@ -31,6 +30,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/Support/MachineValueType.h"
 #include <utility>
 
 namespace llvm {
@@ -102,6 +102,7 @@ class VectorType;
 
       VMOVRRD,      // double to two gprs.
       VMOVDRR,      // Two gprs to double.
+      VMOVSR,       // move gpr to single, used for f32 literal constructed in a gpr
 
       EH_SJLJ_SETJMP,         // SjLj exception handling setjmp.
       EH_SJLJ_LONGJMP,        // SjLj exception handling longjmp.
@@ -353,7 +354,7 @@ class VectorType;
 
     bool isLegalT2ScaledAddressingMode(const AddrMode &AM, EVT VT) const;
 
-    /// \brief Returns true if the addresing mode representing by AM is legal
+    /// Returns true if the addresing mode representing by AM is legal
     /// for the Thumb1 target, for a load/store of the specified type.
     bool isLegalT1ScaledAddressingMode(const AddrMode &AM, EVT VT) const;
 
@@ -387,6 +388,9 @@ class VectorType;
                                        const APInt &DemandedElts,
                                        const SelectionDAG &DAG,
                                        unsigned Depth) const override;
+
+    bool targetShrinkDemandedConstant(SDValue Op, const APInt &Demanded,
+                                      TargetLoweringOpt &TLO) const override;
 
 
     bool ExpandInlineAsm(CallInst *CI) const override;
@@ -481,7 +485,7 @@ class VectorType;
                             MachineFunction &MF,
                             unsigned Intrinsic) const override;
 
-    /// \brief Returns true if it is beneficial to convert a load of a constant
+    /// Returns true if it is beneficial to convert a load of a constant
     /// to just the constant itself.
     bool shouldConvertConstantLoadToIntImm(const APInt &Imm,
                                            Type *Ty) const override;
@@ -491,7 +495,7 @@ class VectorType;
     bool isExtractSubvectorCheap(EVT ResVT, EVT SrcVT,
                                  unsigned Index) const override;
 
-    /// \brief Returns true if an argument of type Ty needs to be passed in a
+    /// Returns true if an argument of type Ty needs to be passed in a
     /// contiguous block of registers in calling convention CallConv.
     bool functionArgumentNeedsConsecutiveRegisters(
         Type *Ty, CallingConv::ID CallConv, bool isVarArg) const override;
@@ -577,6 +581,13 @@ class VectorType;
                                        const DataLayout &DL) const;
 
     void finalizeLowering(MachineFunction &MF) const override;
+
+    /// Return the correct alignment for the current calling convention.
+    unsigned getABIAlignmentForCallingConv(Type *ArgTy,
+                                           DataLayout DL) const override;
+
+    bool isDesirableToCommuteWithShift(const SDNode *N,
+                                       CombineLevel Level) const override;
 
   protected:
     std::pair<const TargetRegisterClass *, uint8_t>
@@ -758,6 +769,8 @@ class VectorType;
     bool isUsedByReturnOnly(SDNode *N, SDValue &Chain) const override;
 
     bool mayBeEmittedAsTailCall(const CallInst *CI) const override;
+
+    bool shouldConsiderGEPOffsetSplit() const override { return true; }
 
     SDValue getCMOV(const SDLoc &dl, EVT VT, SDValue FalseVal, SDValue TrueVal,
                     SDValue ARMcc, SDValue CCR, SDValue Cmp,

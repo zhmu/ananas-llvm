@@ -310,6 +310,7 @@ enum MetadataCodes {
   METADATA_GLOBAL_VAR_EXPR = 37,        // [distinct, var, expr]
   METADATA_INDEX_OFFSET = 38,           // [offset]
   METADATA_INDEX = 39,                  // [bitpos]
+  METADATA_LABEL = 40,                  // [distinct, scope, name, file, line]
 };
 
 // The constants block (CONSTANTS_BLOCK_ID) describes emission for each
@@ -405,6 +406,20 @@ enum RMWOperations {
 enum OverflowingBinaryOperatorOptionalFlags {
   OBO_NO_UNSIGNED_WRAP = 0,
   OBO_NO_SIGNED_WRAP = 1
+};
+
+/// FastMath Flags
+/// This is a fixed layout derived from the bitcode emitted by LLVM 5.0
+/// intended to decouple the in-memory representation from the serialization.
+enum FastMathMap {
+  UnsafeAlgebra   = (1 << 0), // Legacy
+  NoNaNs          = (1 << 1),
+  NoInfs          = (1 << 2),
+  NoSignedZeros   = (1 << 3),
+  AllowReciprocal = (1 << 4),
+  AllowContract   = (1 << 5),
+  ApproxFunc      = (1 << 6),
+  AllowReassoc    = (1 << 7)
 };
 
 /// PossiblyExactOperatorOptionalFlags - Flags for serializing
@@ -573,6 +588,10 @@ enum AttributeKindCodes {
   ATTR_KIND_SPECULATABLE = 53,
   ATTR_KIND_STRICT_FP = 54,
   ATTR_KIND_SANITIZE_HWADDRESS = 55,
+  ATTR_KIND_NOCF_CHECK = 56,
+  ATTR_KIND_OPT_FOR_FUZZING = 57,
+  ATTR_KIND_SHADOWCALLSTACK = 58,
+  ATTR_KIND_SPECULATIVE_LOAD_HARDENING = 59,
 };
 
 enum ComdatSelectionKindCodes {

@@ -24,6 +24,7 @@
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -173,7 +174,7 @@ MachineBasicBlock::SkipPHIsLabelsAndDebug(MachineBasicBlock::iterator I) {
   const TargetInstrInfo *TII = getParent()->getSubtarget().getInstrInfo();
 
   iterator E = end();
-  while (I != E && (I->isPHI() || I->isPosition() || I->isDebugValue() ||
+  while (I != E && (I->isPHI() || I->isPosition() || I->isDebugInstr() ||
                     TII->isBasicBlockPrologue(*I)))
     ++I;
   // FIXME: This needs to change if we wish to bundle labels / dbg_values
@@ -186,7 +187,7 @@ MachineBasicBlock::SkipPHIsLabelsAndDebug(MachineBasicBlock::iterator I) {
 
 MachineBasicBlock::iterator MachineBasicBlock::getFirstTerminator() {
   iterator B = begin(), E = end(), I = E;
-  while (I != B && ((--I)->isTerminator() || I->isDebugValue()))
+  while (I != B && ((--I)->isTerminator() || I->isDebugInstr()))
     ; /*noop */
   while (I != E && !I->isTerminator())
     ++I;
@@ -195,7 +196,7 @@ MachineBasicBlock::iterator MachineBasicBlock::getFirstTerminator() {
 
 MachineBasicBlock::instr_iterator MachineBasicBlock::getFirstInstrTerminator() {
   instr_iterator B = instr_begin(), E = instr_end(), I = E;
-  while (I != B && ((--I)->isTerminator() || I->isDebugValue()))
+  while (I != B && ((--I)->isTerminator() || I->isDebugInstr()))
     ; /*noop */
   while (I != E && !I->isTerminator())
     ++I;
@@ -213,7 +214,7 @@ MachineBasicBlock::iterator MachineBasicBlock::getLastNonDebugInstr() {
   while (I != B) {
     --I;
     // Return instruction that starts a bundle.
-    if (I->isDebugValue() || I->isInsideBundle())
+    if (I->isDebugInstr() || I->isInsideBundle())
       continue;
     return I;
   }
@@ -328,7 +329,7 @@ void MachineBasicBlock::print(raw_ostream &OS, ModuleSlotTracker &MST,
   bool HasLineAttributes = false;
 
   // Print the preds of this block according to the CFG.
-  if (!pred_empty()) {
+  if (!pred_empty() && IsStandalone) {
     if (Indexes) OS << '\t';
     // Don't indent(2), align with previous line attributes.
     OS << "; predecessors: ";
@@ -354,7 +355,7 @@ void MachineBasicBlock::print(raw_ostream &OS, ModuleSlotTracker &MST,
            << format("0x%08" PRIx32, getSuccProbability(I).getNumerator())
            << ')';
     }
-    if (!Probs.empty()) {
+    if (!Probs.empty() && IsStandalone) {
       // Print human readable probabilities as comments.
       OS << "; ";
       for (auto I = succ_begin(), E = succ_end(); I != E; ++I) {
@@ -387,7 +388,6 @@ void MachineBasicBlock::print(raw_ostream &OS, ModuleSlotTracker &MST,
       if (!LI.LaneMask.all())
         OS << ":0x" << PrintLaneMask(LI.LaneMask);
     }
-    OS << '\n';
     HasLineAttributes = true;
   }
 
@@ -409,20 +409,19 @@ void MachineBasicBlock::print(raw_ostream &OS, ModuleSlotTracker &MST,
 
     OS.indent(IsInBundle ? 4 : 2);
     MI.print(OS, MST, IsStandalone, /*SkipOpers=*/false, /*SkipDebugLoc=*/false,
-             &TII);
+             /*AddNewLine=*/false, &TII);
 
     if (!IsInBundle && MI.getFlag(MachineInstr::BundledSucc)) {
       OS << " {";
       IsInBundle = true;
     }
-
     OS << '\n';
   }
 
   if (IsInBundle)
     OS.indent(2) << "}\n";
 
-  if (IrrLoopHeaderWeight) {
+  if (IrrLoopHeaderWeight && IsStandalone) {
     if (Indexes) OS << '\t';
     OS.indent(2) << "; Irreducible loop header weight: "
                  << IrrLoopHeaderWeight.getValue() << '\n';
@@ -459,10 +458,10 @@ bool MachineBasicBlock::isLiveIn(MCPhysReg Reg, LaneBitmask LaneMask) const {
 }
 
 void MachineBasicBlock::sortUniqueLiveIns() {
-  std::sort(LiveIns.begin(), LiveIns.end(),
-            [](const RegisterMaskPair &LI0, const RegisterMaskPair &LI1) {
-              return LI0.PhysReg < LI1.PhysReg;
-            });
+  llvm::sort(LiveIns.begin(), LiveIns.end(),
+             [](const RegisterMaskPair &LI0, const RegisterMaskPair &LI1) {
+               return LI0.PhysReg < LI1.PhysReg;
+             });
   // Liveins are sorted by physreg now we can merge their lanemasks.
   LiveInVector::const_iterator I = LiveIns.begin();
   LiveInVector::const_iterator J;
@@ -660,6 +659,25 @@ void MachineBasicBlock::addSuccessorWithoutProb(MachineBasicBlock *Succ) {
   Succ->addPredecessor(this);
 }
 
+void MachineBasicBlock::splitSuccessor(MachineBasicBlock *Old,
+                                       MachineBasicBlock *New,
+                                       bool NormalizeSuccProbs) {
+  succ_iterator OldI = llvm::find(successors(), Old);
+  assert(OldI != succ_end() && "Old is not a successor of this block!");
+  assert(llvm::find(successors(), New) == succ_end() &&
+         "New is already a successor of this block!");
+
+  // Add a new successor with equal probability as the original one. Note
+  // that we directly copy the probability using the iterator rather than
+  // getting a potentially synthetic probability computed when unknown. This
+  // preserves the probabilities as-is and then we can renormalize them and
+  // query them effectively afterward.
+  addSuccessor(New, Probs.empty() ? BranchProbability::getUnknown()
+                                  : *getProbabilityIterator(OldI));
+  if (NormalizeSuccProbs)
+    normalizeSuccProbs();
+}
+
 void MachineBasicBlock::removeSuccessor(MachineBasicBlock *Succ,
                                         bool NormalizeSuccProbs) {
   succ_iterator I = find(Successors, Succ);
@@ -721,6 +739,14 @@ void MachineBasicBlock::replaceSuccessor(MachineBasicBlock *Old,
       *ProbIter += *getProbabilityIterator(OldI);
   }
   removeSuccessor(OldI);
+}
+
+void MachineBasicBlock::copySuccessor(MachineBasicBlock *Orig,
+                                      succ_iterator I) {
+  if (Orig->Probs.empty())
+    addSuccessor(*I, Orig->getSuccProbability(I));
+  else
+    addSuccessorWithoutProb(*I);
 }
 
 void MachineBasicBlock::addPredecessor(MachineBasicBlock *Pred) {
@@ -848,9 +874,9 @@ MachineBasicBlock *MachineBasicBlock::SplitCriticalEdge(MachineBasicBlock *Succ,
 
   MachineBasicBlock *NMBB = MF->CreateMachineBasicBlock();
   MF->insert(std::next(MachineFunction::iterator(this)), NMBB);
-  DEBUG(dbgs() << "Splitting critical edge: " << printMBBReference(*this)
-               << " -- " << printMBBReference(*NMBB) << " -- "
-               << printMBBReference(*Succ) << '\n');
+  LLVM_DEBUG(dbgs() << "Splitting critical edge: " << printMBBReference(*this)
+                    << " -- " << printMBBReference(*NMBB) << " -- "
+                    << printMBBReference(*Succ) << '\n');
 
   LiveIntervals *LIS = P.getAnalysisIfAvailable<LiveIntervals>();
   SlotIndexes *Indexes = P.getAnalysisIfAvailable<SlotIndexes>();
@@ -879,7 +905,7 @@ MachineBasicBlock *MachineBasicBlock::SplitCriticalEdge(MachineBasicBlock *Succ,
         if (TargetRegisterInfo::isPhysicalRegister(Reg) ||
             LV->getVarInfo(Reg).removeKill(*MI)) {
           KilledRegs.push_back(Reg);
-          DEBUG(dbgs() << "Removing terminator kill: " << *MI);
+          LLVM_DEBUG(dbgs() << "Removing terminator kill: " << *MI);
           OI->setIsKill(false);
         }
       }
@@ -970,7 +996,7 @@ MachineBasicBlock *MachineBasicBlock::SplitCriticalEdge(MachineBasicBlock *Succ,
           continue;
         if (TargetRegisterInfo::isVirtualRegister(Reg))
           LV->getVarInfo(Reg).Kills.push_back(&*I);
-        DEBUG(dbgs() << "Restored terminator kill: " << *I);
+        LLVM_DEBUG(dbgs() << "Restored terminator kill: " << *I);
         break;
       }
     }
@@ -1103,8 +1129,8 @@ bool MachineBasicBlock::canSplitCriticalEdge(
   // case that we can't handle. Since this never happens in properly optimized
   // code, just skip those edges.
   if (TBB && TBB == FBB) {
-    DEBUG(dbgs() << "Won't split critical edge after degenerate "
-                 << printMBBReference(*this) << '\n');
+    LLVM_DEBUG(dbgs() << "Won't split critical edge after degenerate "
+                      << printMBBReference(*this) << '\n');
     return false;
   }
   return true;
@@ -1258,6 +1284,16 @@ MachineBasicBlock::findDebugLoc(instr_iterator MBBI) {
   return {};
 }
 
+/// Find the previous valid DebugLoc preceding MBBI, skipping and DBG_VALUE
+/// instructions.  Return UnknownLoc if there is none.
+DebugLoc MachineBasicBlock::findPrevDebugLoc(instr_iterator MBBI) {
+  if (MBBI == instr_begin()) return {};
+  // Skip debug declarations, we don't want a DebugLoc from them.
+  MBBI = skipDebugInstructionsBackward(std::prev(MBBI), instr_begin());
+  if (!MBBI->isDebugInstr()) return MBBI->getDebugLoc();
+  return {};
+}
+
 /// Find and return the merged DebugLoc of the branch instructions of the block.
 /// Return UnknownLoc if there is none.
 DebugLoc
@@ -1339,12 +1375,56 @@ MachineBasicBlock::computeRegisterLiveness(const TargetRegisterInfo *TRI,
                                            unsigned Neighborhood) const {
   unsigned N = Neighborhood;
 
-  // Start by searching backwards from Before, looking for kills, reads or defs.
+  // Try searching forwards from Before, looking for reads or defs.
   const_iterator I(Before);
+  // If this is the last insn in the block, don't search forwards.
+  if (I != end()) {
+    for (++I; I != end() && N > 0; ++I) {
+      if (I->isDebugInstr())
+        continue;
+
+      --N;
+
+      MachineOperandIteratorBase::PhysRegInfo Info =
+          ConstMIOperands(*I).analyzePhysReg(Reg, TRI);
+
+      // Register is live when we read it here.
+      if (Info.Read)
+        return LQR_Live;
+      // Register is dead if we can fully overwrite or clobber it here.
+      if (Info.FullyDefined || Info.Clobbered)
+        return LQR_Dead;
+    }
+  }
+
+  // If we reached the end, it is safe to clobber Reg at the end of a block of
+  // no successor has it live in.
+  if (I == end()) {
+    for (MachineBasicBlock *S : successors()) {
+      for (MCSubRegIterator SubReg(Reg, TRI, /*IncludeSelf*/true);
+           SubReg.isValid(); ++SubReg) {
+        if (S->isLiveIn(*SubReg))
+          return LQR_Live;
+      }
+    }
+
+    return LQR_Dead;
+  }
+
+
+  N = Neighborhood;
+
+  // Start by searching backwards from Before, looking for kills, reads or defs.
+  I = const_iterator(Before);
   // If this is the first insn in the block, don't search backwards.
   if (I != begin()) {
     do {
       --I;
+
+      if (I->isDebugInstr())
+        continue;
+
+      --N;
 
       MachineOperandIteratorBase::PhysRegInfo Info =
           ConstMIOperands(*I).analyzePhysReg(Reg, TRI);
@@ -1370,7 +1450,8 @@ MachineBasicBlock::computeRegisterLiveness(const TargetRegisterInfo *TRI,
       // Register must be live if we read it.
       if (Info.Read)
         return LQR_Live;
-    } while (I != begin() && --N > 0);
+
+    } while (I != begin() && N > 0);
   }
 
   // Did we get to the start of the block?
@@ -1382,25 +1463,6 @@ MachineBasicBlock::computeRegisterLiveness(const TargetRegisterInfo *TRI,
         return LQR_Live;
 
     return LQR_Dead;
-  }
-
-  N = Neighborhood;
-
-  // Try searching forwards from Before, looking for reads or defs.
-  I = const_iterator(Before);
-  // If this is the last insn in the block, don't search forwards.
-  if (I != end()) {
-    for (++I; I != end() && N > 0; ++I, --N) {
-      MachineOperandIteratorBase::PhysRegInfo Info =
-          ConstMIOperands(*I).analyzePhysReg(Reg, TRI);
-
-      // Register is live when we read it here.
-      if (Info.Read)
-        return LQR_Live;
-      // Register is dead if we can fully overwrite or clobber it here.
-      if (Info.FullyDefined || Info.Clobbered)
-        return LQR_Dead;
-    }
   }
 
   // At this point we have no idea of the liveness of the register.

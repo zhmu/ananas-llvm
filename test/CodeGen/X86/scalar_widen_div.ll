@@ -11,7 +11,7 @@ define void @vectorDiv (<2 x i32> addrspace(1)* %nsource, <2 x i32> addrspace(1)
 ; CHECK-NEXT:    movq %rdx, %r8
 ; CHECK-NEXT:    movq %rdi, -{{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movq %rsi, -{{[0-9]+}}(%rsp)
-; CHECK-NEXT:    movq %r8, -{{[0-9]+}}(%rsp)
+; CHECK-NEXT:    movq %rdx, -{{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movslq -{{[0-9]+}}(%rsp), %rcx
 ; CHECK-NEXT:    pmovsxdq (%rdi,%rcx,8), %xmm0
 ; CHECK-NEXT:    pmovsxdq (%rsi,%rcx,8), %xmm1
@@ -402,10 +402,10 @@ define <5 x i64> @test_ulong_rem(<5 x i64> %num, <5 x i64> %rem) {
 define void @test_int_div(<3 x i32>* %dest, <3 x i32>* %old, i32 %n) {
 ; CHECK-LABEL: test_int_div:
 ; CHECK:       # %bb.0: # %entry
-; CHECK-NEXT:    movl %edx, %r9d
-; CHECK-NEXT:    testl %r9d, %r9d
+; CHECK-NEXT:    testl %edx, %edx
 ; CHECK-NEXT:    jle .LBB12_3
 ; CHECK-NEXT:  # %bb.1: # %bb.nph
+; CHECK-NEXT:    movl %edx, %r9d
 ; CHECK-NEXT:    xorl %ecx, %ecx
 ; CHECK-NEXT:    .p2align 4, 0x90
 ; CHECK-NEXT:  .LBB12_2: # %for.body
@@ -427,7 +427,6 @@ define void @test_int_div(<3 x i32>* %dest, <3 x i32>* %old, i32 %n) {
 ; CHECK-NEXT:    pextrd $2, %xmm1, %r8d
 ; CHECK-NEXT:    cltd
 ; CHECK-NEXT:    idivl %r8d
-; CHECK-NEXT:    pinsrd $2, %eax, %xmm2
 ; CHECK-NEXT:    movl %eax, 8(%rdi,%rcx)
 ; CHECK-NEXT:    movq %xmm2, (%rdi,%rcx)
 ; CHECK-NEXT:    addq $16, %rcx
