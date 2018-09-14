@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief This file implements a register stacking pass.
+/// This file implements a register stacking pass.
 ///
 /// This pass reorders instructions to put register uses and defs in an order
 /// such that they form single-use expression trees. Registers fitting this form
@@ -67,6 +67,10 @@ public:
 } // end anonymous namespace
 
 char WebAssemblyRegStackify::ID = 0;
+INITIALIZE_PASS(WebAssemblyRegStackify, DEBUG_TYPE,
+                "Reorder instructions to use the WebAssembly value stack",
+                false, false)
+
 FunctionPass *llvm::createWebAssemblyRegStackify() {
   return new WebAssemblyRegStackify();
 }
@@ -96,8 +100,7 @@ static void ConvertImplicitDefToConstZero(MachineInstr *MI,
                                           MachineFunction &MF) {
   assert(MI->getOpcode() == TargetOpcode::IMPLICIT_DEF);
 
-  const auto *RegClass =
-      MRI.getRegClass(MI->getOperand(0).getReg());
+  const auto *RegClass = MRI.getRegClass(MI->getOperand(0).getReg());
   if (RegClass == &WebAssembly::I32RegClass) {
     MI->setDesc(TII->get(WebAssembly::CONST_I32));
     MI->addOperand(MachineOperand::CreateImm(0));
@@ -156,10 +159,9 @@ static void QueryCallee(const MachineInstr &MI, unsigned CalleeOpNo, bool &Read,
 // and/or uses the stack pointer value.
 static void Query(const MachineInstr &MI, AliasAnalysis &AA, bool &Read,
                   bool &Write, bool &Effects, bool &StackPointer) {
-  assert(!MI.isPosition());
   assert(!MI.isTerminator());
 
-  if (MI.isDebugValue())
+  if (MI.isDebugInstr() || MI.isPosition())
     return;
 
   // Check for loads.
@@ -184,14 +186,22 @@ static void Query(const MachineInstr &MI, AliasAnalysis &AA, bool &Read,
     }
   } else if (MI.hasOrderedMemoryRef()) {
     switch (MI.getOpcode()) {
-    case WebAssembly::DIV_S_I32: case WebAssembly::DIV_S_I64:
-    case WebAssembly::REM_S_I32: case WebAssembly::REM_S_I64:
-    case WebAssembly::DIV_U_I32: case WebAssembly::DIV_U_I64:
-    case WebAssembly::REM_U_I32: case WebAssembly::REM_U_I64:
-    case WebAssembly::I32_TRUNC_S_F32: case WebAssembly::I64_TRUNC_S_F32:
-    case WebAssembly::I32_TRUNC_S_F64: case WebAssembly::I64_TRUNC_S_F64:
-    case WebAssembly::I32_TRUNC_U_F32: case WebAssembly::I64_TRUNC_U_F32:
-    case WebAssembly::I32_TRUNC_U_F64: case WebAssembly::I64_TRUNC_U_F64:
+    case WebAssembly::DIV_S_I32:
+    case WebAssembly::DIV_S_I64:
+    case WebAssembly::REM_S_I32:
+    case WebAssembly::REM_S_I64:
+    case WebAssembly::DIV_U_I32:
+    case WebAssembly::DIV_U_I64:
+    case WebAssembly::REM_U_I32:
+    case WebAssembly::REM_U_I64:
+    case WebAssembly::I32_TRUNC_S_F32:
+    case WebAssembly::I64_TRUNC_S_F32:
+    case WebAssembly::I32_TRUNC_S_F64:
+    case WebAssembly::I64_TRUNC_S_F64:
+    case WebAssembly::I32_TRUNC_U_F32:
+    case WebAssembly::I64_TRUNC_U_F32:
+    case WebAssembly::I32_TRUNC_U_F64:
+    case WebAssembly::I64_TRUNC_U_F64:
       // These instruction have hasUnmodeledSideEffects() returning true
       // because they trap on overflow and invalid so they can't be arbitrarily
       // moved, however hasOrderedMemoryRef() interprets this plus their lack
@@ -211,14 +221,22 @@ static void Query(const MachineInstr &MI, AliasAnalysis &AA, bool &Read,
   // Check for side effects.
   if (MI.hasUnmodeledSideEffects()) {
     switch (MI.getOpcode()) {
-    case WebAssembly::DIV_S_I32: case WebAssembly::DIV_S_I64:
-    case WebAssembly::REM_S_I32: case WebAssembly::REM_S_I64:
-    case WebAssembly::DIV_U_I32: case WebAssembly::DIV_U_I64:
-    case WebAssembly::REM_U_I32: case WebAssembly::REM_U_I64:
-    case WebAssembly::I32_TRUNC_S_F32: case WebAssembly::I64_TRUNC_S_F32:
-    case WebAssembly::I32_TRUNC_S_F64: case WebAssembly::I64_TRUNC_S_F64:
-    case WebAssembly::I32_TRUNC_U_F32: case WebAssembly::I64_TRUNC_U_F32:
-    case WebAssembly::I32_TRUNC_U_F64: case WebAssembly::I64_TRUNC_U_F64:
+    case WebAssembly::DIV_S_I32:
+    case WebAssembly::DIV_S_I64:
+    case WebAssembly::REM_S_I32:
+    case WebAssembly::REM_S_I64:
+    case WebAssembly::DIV_U_I32:
+    case WebAssembly::DIV_U_I64:
+    case WebAssembly::REM_U_I32:
+    case WebAssembly::REM_U_I64:
+    case WebAssembly::I32_TRUNC_S_F32:
+    case WebAssembly::I64_TRUNC_S_F32:
+    case WebAssembly::I32_TRUNC_S_F64:
+    case WebAssembly::I64_TRUNC_S_F64:
+    case WebAssembly::I32_TRUNC_U_F32:
+    case WebAssembly::I64_TRUNC_U_F32:
+    case WebAssembly::I32_TRUNC_U_F64:
+    case WebAssembly::I64_TRUNC_U_F64:
       // These instructions have hasUnmodeledSideEffects() returning true
       // because they trap on overflow and invalid so they can't be arbitrarily
       // moved, however in the specific case of register stackifying, it is safe
@@ -232,20 +250,8 @@ static void Query(const MachineInstr &MI, AliasAnalysis &AA, bool &Read,
 
   // Analyze calls.
   if (MI.isCall()) {
-    switch (MI.getOpcode()) {
-    case WebAssembly::CALL_VOID:
-    case WebAssembly::CALL_INDIRECT_VOID:
-      QueryCallee(MI, 0, Read, Write, Effects, StackPointer);
-      break;
-    case WebAssembly::CALL_I32: case WebAssembly::CALL_I64:
-    case WebAssembly::CALL_F32: case WebAssembly::CALL_F64:
-    case WebAssembly::CALL_INDIRECT_I32: case WebAssembly::CALL_INDIRECT_I64:
-    case WebAssembly::CALL_INDIRECT_F32: case WebAssembly::CALL_INDIRECT_F64:
-      QueryCallee(MI, 1, Read, Write, Effects, StackPointer);
-      break;
-    default:
-      llvm_unreachable("unexpected call opcode");
-    }
+    unsigned CalleeOpNo = WebAssembly::getCalleeOpNo(MI);
+    QueryCallee(MI, CalleeOpNo, Read, Write, Effects, StackPointer);
   }
 }
 
@@ -260,8 +266,7 @@ static bool ShouldRematerialize(const MachineInstr &Def, AliasAnalysis &AA,
 // LiveIntervals to handle complex cases.
 static MachineInstr *GetVRegDef(unsigned Reg, const MachineInstr *Insert,
                                 const MachineRegisterInfo &MRI,
-                                const LiveIntervals &LIS)
-{
+                                const LiveIntervals &LIS) {
   // Most registers are in SSA form here so we try a quick MRI query first.
   if (MachineInstr *Def = MRI.getUniqueVRegDef(Reg))
     return Def;
@@ -277,17 +282,16 @@ static MachineInstr *GetVRegDef(unsigned Reg, const MachineInstr *Insert,
 // Test whether Reg, as defined at Def, has exactly one use. This is a
 // generalization of MachineRegisterInfo::hasOneUse that uses LiveIntervals
 // to handle complex cases.
-static bool HasOneUse(unsigned Reg, MachineInstr *Def,
-                      MachineRegisterInfo &MRI, MachineDominatorTree &MDT,
-                      LiveIntervals &LIS) {
+static bool HasOneUse(unsigned Reg, MachineInstr *Def, MachineRegisterInfo &MRI,
+                      MachineDominatorTree &MDT, LiveIntervals &LIS) {
   // Most registers are in SSA form here so we try a quick MRI query first.
   if (MRI.hasOneUse(Reg))
     return true;
 
   bool HasOne = false;
   const LiveInterval &LI = LIS.getInterval(Reg);
-  const VNInfo *DefVNI = LI.getVNInfoAt(
-      LIS.getInstructionIndex(*Def).getRegSlot());
+  const VNInfo *DefVNI =
+      LI.getVNInfoAt(LIS.getInstructionIndex(*Def).getRegSlot());
   assert(DefVNI);
   for (auto &I : MRI.use_nodbg_operands(Reg)) {
     const auto &Result = LI.Query(LIS.getInstructionIndex(*I.getParent()));
@@ -456,20 +460,19 @@ static unsigned GetTeeOpcode(const TargetRegisterClass *RC) {
 // Shrink LI to its uses, cleaning up LI.
 static void ShrinkToUses(LiveInterval &LI, LiveIntervals &LIS) {
   if (LIS.shrinkToUses(&LI)) {
-    SmallVector<LiveInterval*, 4> SplitLIs;
+    SmallVector<LiveInterval *, 4> SplitLIs;
     LIS.splitSeparateComponents(LI, SplitLIs);
   }
 }
 
 /// A single-use def in the same block with no intervening memory or register
 /// dependencies; move the def down and nest it with the current instruction.
-static MachineInstr *MoveForSingleUse(unsigned Reg, MachineOperand& Op,
-                                      MachineInstr *Def,
-                                      MachineBasicBlock &MBB,
+static MachineInstr *MoveForSingleUse(unsigned Reg, MachineOperand &Op,
+                                      MachineInstr *Def, MachineBasicBlock &MBB,
                                       MachineInstr *Insert, LiveIntervals &LIS,
                                       WebAssemblyFunctionInfo &MFI,
                                       MachineRegisterInfo &MRI) {
-  DEBUG(dbgs() << "Move for single use: "; Def->dump());
+  LLVM_DEBUG(dbgs() << "Move for single use: "; Def->dump());
 
   MBB.splice(Insert, &MBB, Def);
   LIS.handleMove(*Def);
@@ -496,7 +499,7 @@ static MachineInstr *MoveForSingleUse(unsigned Reg, MachineOperand& Op,
 
     MFI.stackifyVReg(NewReg);
 
-    DEBUG(dbgs() << " - Replaced register: "; Def->dump());
+    LLVM_DEBUG(dbgs() << " - Replaced register: "; Def->dump());
   }
 
   ImposeStackOrdering(Def);
@@ -510,8 +513,8 @@ static MachineInstr *RematerializeCheapDef(
     MachineBasicBlock::instr_iterator Insert, LiveIntervals &LIS,
     WebAssemblyFunctionInfo &MFI, MachineRegisterInfo &MRI,
     const WebAssemblyInstrInfo *TII, const WebAssemblyRegisterInfo *TRI) {
-  DEBUG(dbgs() << "Rematerializing cheap def: "; Def.dump());
-  DEBUG(dbgs() << " - for use in "; Op.getParent()->dump());
+  LLVM_DEBUG(dbgs() << "Rematerializing cheap def: "; Def.dump());
+  LLVM_DEBUG(dbgs() << " - for use in "; Op.getParent()->dump());
 
   unsigned NewReg = MRI.createVirtualRegister(MRI.getRegClass(Reg));
   TII->reMaterialize(MBB, Insert, NewReg, 0, Def, *TRI);
@@ -522,7 +525,7 @@ static MachineInstr *RematerializeCheapDef(
   MFI.stackifyVReg(NewReg);
   ImposeStackOrdering(Clone);
 
-  DEBUG(dbgs() << " - Cloned to "; Clone->dump());
+  LLVM_DEBUG(dbgs() << " - Cloned to "; Clone->dump());
 
   // Shrink the interval.
   bool IsDead = MRI.use_empty(Reg);
@@ -534,7 +537,7 @@ static MachineInstr *RematerializeCheapDef(
 
   // If that was the last use of the original, delete the original.
   if (IsDead) {
-    DEBUG(dbgs() << " - Deleting original\n");
+    LLVM_DEBUG(dbgs() << " - Deleting original\n");
     SlotIndex Idx = LIS.getInstructionIndex(Def).getRegSlot();
     LIS.removePhysRegDefAt(WebAssembly::ARGUMENTS, Idx);
     LIS.removeInterval(Reg);
@@ -569,7 +572,7 @@ static MachineInstr *MoveAndTeeForMultiUse(
     unsigned Reg, MachineOperand &Op, MachineInstr *Def, MachineBasicBlock &MBB,
     MachineInstr *Insert, LiveIntervals &LIS, WebAssemblyFunctionInfo &MFI,
     MachineRegisterInfo &MRI, const WebAssemblyInstrInfo *TII) {
-  DEBUG(dbgs() << "Move and tee for multi-use:"; Def->dump());
+  LLVM_DEBUG(dbgs() << "Move and tee for multi-use:"; Def->dump());
 
   // Move Def into place.
   MBB.splice(Insert, &MBB, Def);
@@ -605,8 +608,8 @@ static MachineInstr *MoveAndTeeForMultiUse(
   ImposeStackOrdering(Def);
   ImposeStackOrdering(Tee);
 
-  DEBUG(dbgs() << " - Replaced register: "; Def->dump());
-  DEBUG(dbgs() << " - Tee instruction: "; Tee->dump());
+  LLVM_DEBUG(dbgs() << " - Replaced register: "; Def->dump());
+  LLVM_DEBUG(dbgs() << " - Tee instruction: "; Tee->dump());
   return Def;
 }
 
@@ -733,9 +736,9 @@ public:
 } // end anonymous namespace
 
 bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
-  DEBUG(dbgs() << "********** Register Stackifying **********\n"
-                  "********** Function: "
-               << MF.getName() << '\n');
+  LLVM_DEBUG(dbgs() << "********** Register Stackifying **********\n"
+                       "********** Function: "
+                    << MF.getName() << '\n');
 
   bool Changed = false;
   MachineRegisterInfo &MRI = MF.getRegInfo();
@@ -745,14 +748,6 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
   AliasAnalysis &AA = getAnalysis<AAResultsWrapperPass>().getAAResults();
   MachineDominatorTree &MDT = getAnalysis<MachineDominatorTree>();
   LiveIntervals &LIS = getAnalysis<LiveIntervals>();
-
-  // Disable the TEE optimization if we aren't doing direct wasm object
-  // emission, because lowering TEE to TEE_LOCAL is done in the ExplicitLocals
-  // pass, which is also disabled.
-  bool UseTee = true;
-  if (MF.getSubtarget<WebAssemblySubtarget>()
-        .getTargetTriple().isOSBinFormatELF())
-    UseTee = false;
 
   // Walk the instructions from the bottom up. Currently we don't look past
   // block boundaries, and the blocks aren't ordered so the block visitation
@@ -819,7 +814,7 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
           Insert =
               RematerializeCheapDef(Reg, Op, *Def, MBB, Insert->getIterator(),
                                     LIS, MFI, MRI, TII, TRI);
-        } else if (UseTee && CanMove &&
+        } else if (CanMove &&
                    OneUseDominatesOtherUses(Reg, Op, MBB, MRI, MDT, LIS, MFI)) {
           Insert = MoveAndTeeForMultiUse(Reg, Op, Def, MBB, Insert, LIS, MFI,
                                          MRI, TII);
@@ -867,7 +862,7 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
   SmallVector<unsigned, 0> Stack;
   for (MachineBasicBlock &MBB : MF) {
     for (MachineInstr &MI : MBB) {
-      if (MI.isDebugValue())
+      if (MI.isDebugInstr())
         continue;
       for (MachineOperand &MO : reverse(MI.explicit_operands())) {
         if (!MO.isReg())

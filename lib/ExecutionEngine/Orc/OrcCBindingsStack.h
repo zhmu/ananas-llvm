@@ -15,6 +15,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ExecutionEngine/JITSymbol.h"
+#include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/ExecutionEngine/Orc/CompileOnDemandLayer.h"
 #include "llvm/ExecutionEngine/Orc/CompileUtils.h"
 #include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
@@ -43,8 +44,6 @@ namespace llvm {
 
 class OrcCBindingsStack;
 
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(std::shared_ptr<Module>,
-                                   LLVMSharedModuleRef)
 DEFINE_SIMPLE_CONVERSION_FUNCTIONS(OrcCBindingsStack, LLVMOrcJITStackRef)
 DEFINE_SIMPLE_CONVERSION_FUNCTIONS(TargetMachine, LLVMTargetMachineRef)
 
@@ -130,21 +129,21 @@ private:
         : Stack(Stack), ExternalResolver(std::move(ExternalResolver)),
           ExternalResolverCtx(std::move(ExternalResolverCtx)) {}
 
-    orc::SymbolNameSet lookupFlags(orc::SymbolFlagsMap &SymbolFlags,
-                                   const orc::SymbolNameSet &Symbols) override {
-      orc::SymbolNameSet SymbolsNotFound;
+    orc::SymbolNameSet
+    getResponsibilitySet(const orc::SymbolNameSet &Symbols) override {
+      orc::SymbolNameSet Result;
 
       for (auto &S : Symbols) {
-        if (auto Sym = findSymbol(*S))
-          SymbolFlags[S] = Sym.getFlags();
-        else if (auto Err = Sym.takeError()) {
+        if (auto Sym = findSymbol(*S)) {
+          if (!Sym.getFlags().isStrong())
+            Result.insert(S);
+        } else if (auto Err = Sym.takeError()) {
           Stack.reportError(std::move(Err));
           return orc::SymbolNameSet();
-        } else
-          SymbolsNotFound.insert(S);
+        }
       }
 
-      return SymbolsNotFound;
+      return Result;
     }
 
     orc::SymbolNameSet
@@ -154,18 +153,25 @@ private:
 
       for (auto &S : Symbols) {
         if (auto Sym = findSymbol(*S)) {
-          if (auto Addr = Sym.getAddress())
-            Query->setDefinition(S, JITEvaluatedSymbol(*Addr, Sym.getFlags()));
-          else {
-            Query->setFailed(Addr.takeError());
+          if (auto Addr = Sym.getAddress()) {
+            Query->resolve(S, JITEvaluatedSymbol(*Addr, Sym.getFlags()));
+            Query->notifySymbolReady();
+          } else {
+            Stack.ES.legacyFailQuery(*Query, Addr.takeError());
             return orc::SymbolNameSet();
           }
         } else if (auto Err = Sym.takeError()) {
-          Query->setFailed(std::move(Err));
+          Stack.ES.legacyFailQuery(*Query, std::move(Err));
           return orc::SymbolNameSet();
         } else
           UnresolvedSymbols.insert(S);
       }
+
+      if (Query->isFullyResolved())
+        Query->handleFullyResolved();
+
+      if (Query->isFullyReady())
+        Query->handleFullyReady();
 
       return UnresolvedSymbols;
     }
@@ -198,12 +204,10 @@ private:
   };
 
 public:
-
   OrcCBindingsStack(TargetMachine &TM,
-                    std::unique_ptr<CompileCallbackMgr> CCMgr,
                     IndirectStubsManagerBuilder IndirectStubsMgrBuilder)
-      : ES(SSP), DL(TM.createDataLayout()),
-        IndirectStubsMgr(IndirectStubsMgrBuilder()), CCMgr(std::move(CCMgr)),
+      : CCMgr(createLocalCompileCallbackManager(TM.getTargetTriple(), ES, 0)),
+        DL(TM.createDataLayout()), IndirectStubsMgr(IndirectStubsMgrBuilder()),
         ObjectLayer(ES,
                     [this](orc::VModuleKey K) {
                       auto ResolverI = Resolvers.find(K);
@@ -213,6 +217,14 @@ public:
                       Resolvers.erase(ResolverI);
                       return ObjLayerT::Resources{
                           std::make_shared<SectionMemoryManager>(), Resolver};
+                    },
+                    nullptr,
+                    [this](orc::VModuleKey K, const object::ObjectFile &Obj,
+                           const RuntimeDyld::LoadedObjectInfo &LoadedObjInfo) {
+		      this->notifyFinalized(K, Obj, LoadedObjInfo);
+                    },
+                    [this](orc::VModuleKey K, const object::ObjectFile &Obj) {
+		      this->notifyFreed(K, Obj);
                     }),
         CompileLayer(ObjectLayer, orc::SimpleCompiler(TM)),
         CODLayer(ES, CompileLayer,
@@ -261,15 +273,15 @@ public:
   createLazyCompileCallback(JITTargetAddress &RetAddr,
                             LLVMOrcLazyCompileCallbackFn Callback,
                             void *CallbackCtx) {
-    if (auto CCInfoOrErr = CCMgr->getCompileCallback()) {
-      auto &CCInfo = *CCInfoOrErr;
-      CCInfo.setCompileAction([=]() -> JITTargetAddress {
-          return Callback(wrap(this), CallbackCtx);
-        });
-      RetAddr = CCInfo.getAddress();
+    auto WrappedCallback = [=]() -> JITTargetAddress {
+      return Callback(wrap(this), CallbackCtx);
+    };
+
+    if (auto CCAddr = CCMgr->getCompileCallback(std::move(WrappedCallback))) {
+      RetAddr = *CCAddr;
       return LLVMOrcErrSuccess;
     } else
-      return mapError(CCInfoOrErr.takeError());
+      return mapError(CCAddr.takeError());
   }
 
   LLVMOrcErrorCode createIndirectStub(StringRef StubName,
@@ -284,7 +296,7 @@ public:
   }
   template <typename LayerT>
   LLVMOrcErrorCode
-  addIRModule(orc::VModuleKey &RetKey, LayerT &Layer, std::shared_ptr<Module> M,
+  addIRModule(orc::VModuleKey &RetKey, LayerT &Layer, std::unique_ptr<Module> M,
               std::unique_ptr<RuntimeDyld::MemoryManager> MemMgr,
               LLVMOrcSymbolResolverFn ExternalResolver,
               void *ExternalResolverCtx) {
@@ -323,7 +335,7 @@ public:
   }
 
   LLVMOrcErrorCode addIRModuleEager(orc::VModuleKey &RetKey,
-                                    std::shared_ptr<Module> M,
+                                    std::unique_ptr<Module> M,
                                     LLVMOrcSymbolResolverFn ExternalResolver,
                                     void *ExternalResolverCtx) {
     return addIRModule(RetKey, CompileLayer, std::move(M),
@@ -332,7 +344,7 @@ public:
   }
 
   LLVMOrcErrorCode addIRModuleLazy(orc::VModuleKey &RetKey,
-                                   std::shared_ptr<Module> M,
+                                   std::unique_ptr<Module> M,
                                    LLVMOrcSymbolResolverFn ExternalResolver,
                                    void *ExternalResolverCtx) {
     return addIRModule(RetKey, CODLayer, std::move(M),
@@ -353,24 +365,21 @@ public:
                              std::unique_ptr<MemoryBuffer> ObjBuffer,
                              LLVMOrcSymbolResolverFn ExternalResolver,
                              void *ExternalResolverCtx) {
-    if (auto ObjOrErr =
-        object::ObjectFile::createObjectFile(ObjBuffer->getMemBufferRef())) {
-      auto &Obj = *ObjOrErr;
-      auto OwningObj =
-        std::make_shared<OwningObject>(std::move(Obj), std::move(ObjBuffer));
+    if (auto Obj = object::ObjectFile::createObjectFile(
+            ObjBuffer->getMemBufferRef())) {
 
       RetKey = ES.allocateVModule();
       Resolvers[RetKey] = std::make_shared<CBindingsResolver>(
           *this, ExternalResolver, ExternalResolverCtx);
 
-      if (auto Err = ObjectLayer.addObject(RetKey, std::move(OwningObj)))
+      if (auto Err = ObjectLayer.addObject(RetKey, std::move(ObjBuffer)))
         return mapError(std::move(Err));
 
       KeyLayers[RetKey] = detail::createGenericLayer(ObjectLayer);
 
       return LLVMOrcErrSuccess;
     } else
-      return mapError(ObjOrErr.takeError());
+      return mapError(Obj.takeError());
   }
 
   JITSymbol findSymbol(const std::string &Name,
@@ -382,7 +391,8 @@ public:
 
   JITSymbol findSymbolIn(orc::VModuleKey K, const std::string &Name,
                          bool ExportedSymbolsOnly) {
-    return KeyLayers[K]->findSymbolIn(K, Name, ExportedSymbolsOnly);
+    assert(KeyLayers.count(K) && "looking up symbol in unknown module");
+    return KeyLayers[K]->findSymbolIn(K, mangle(Name), ExportedSymbolsOnly);
   }
 
   LLVMOrcErrorCode findSymbolAddress(JITTargetAddress &RetAddr,
@@ -405,7 +415,45 @@ public:
     return LLVMOrcErrSuccess;
   }
 
+  LLVMOrcErrorCode findSymbolAddressIn(JITTargetAddress &RetAddr,
+                                       orc::VModuleKey K,
+                                       const std::string &Name,
+                                       bool ExportedSymbolsOnly) {
+    RetAddr = 0;
+    if (auto Sym = findSymbolIn(K, Name, ExportedSymbolsOnly)) {
+      // Successful lookup, non-null symbol:
+      if (auto AddrOrErr = Sym.getAddress()) {
+        RetAddr = *AddrOrErr;
+        return LLVMOrcErrSuccess;
+      } else
+        return mapError(AddrOrErr.takeError());
+    } else if (auto Err = Sym.takeError()) {
+      // Lookup failure - report error.
+      return mapError(std::move(Err));
+    }
+    // Otherwise we had a successful lookup but got a null result. We already
+    // set RetAddr to '0' above, so just return success.
+    return LLVMOrcErrSuccess;
+  }
+
   const std::string &getErrorMessage() const { return ErrMsg; }
+
+  void RegisterJITEventListener(JITEventListener *L) {
+    if (!L)
+      return;
+    EventListeners.push_back(L);
+  }
+
+  void UnregisterJITEventListener(JITEventListener *L) {
+    if (!L)
+      return;
+
+    auto I = find(reverse(EventListeners), L);
+    if (I != EventListeners.rend()) {
+      std::swap(*I, EventListeners.back());
+      EventListeners.pop_back();
+    }
+  }
 
 private:
 
@@ -426,15 +474,28 @@ private:
     logAllUnhandledErrors(std::move(Err), errs(), "ORC error: ");
   };
 
-  orc::SymbolStringPool SSP;
+  void notifyFinalized(orc::VModuleKey K,
+		       const object::ObjectFile &Obj,
+		       const RuntimeDyld::LoadedObjectInfo &LoadedObjInfo) {
+    for (auto &Listener : EventListeners)
+      Listener->NotifyObjectEmitted(Obj, LoadedObjInfo);
+  }
+
+  void notifyFreed(orc::VModuleKey K, const object::ObjectFile &Obj) {
+    for (auto &Listener : EventListeners)
+      Listener->NotifyFreeingObject(Obj);
+  }
+
   orc::ExecutionSession ES;
+  std::unique_ptr<CompileCallbackMgr> CCMgr;
+
+  std::vector<JITEventListener *> EventListeners;
 
   DataLayout DL;
   SectionMemoryManager CCMgrMemMgr;
 
   std::unique_ptr<orc::IndirectStubsManager> IndirectStubsMgr;
 
-  std::unique_ptr<CompileCallbackMgr> CCMgr;
   ObjLayerT ObjectLayer;
   CompileLayerT CompileLayer;
   CODLayerT CODLayer;

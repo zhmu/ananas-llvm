@@ -21,6 +21,7 @@
 #include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/ExecutionEngine/JITSymbol.h"
 #include "llvm/ExecutionEngine/Orc/CompileUtils.h"
+#include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
 #include "llvm/ExecutionEngine/Orc/LazyEmittingLayer.h"
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
@@ -54,6 +55,7 @@ class ObjectCache;
 namespace orc {
 
 class OrcMCJITReplacement : public ExecutionEngine {
+
   // OrcMCJITReplacement needs to do a little extra book-keeping to ensure that
   // Orc's automatic finalization doesn't kick in earlier than MCJIT clients are
   // expecting - see finalizeMemory.
@@ -142,61 +144,72 @@ class OrcMCJITReplacement : public ExecutionEngine {
   public:
     LinkingORCResolver(OrcMCJITReplacement &M) : M(M) {}
 
-    SymbolNameSet lookupFlags(SymbolFlagsMap &SymbolFlags,
-                              const SymbolNameSet &Symbols) override {
-      SymbolNameSet UnresolvedSymbols;
+    SymbolNameSet getResponsibilitySet(const SymbolNameSet &Symbols) override {
+      SymbolNameSet Result;
 
       for (auto &S : Symbols) {
         if (auto Sym = M.findMangledSymbol(*S)) {
-          SymbolFlags[S] = Sym.getFlags();
+          if (!Sym.getFlags().isStrong())
+            Result.insert(S);
         } else if (auto Err = Sym.takeError()) {
           M.reportError(std::move(Err));
           return SymbolNameSet();
         } else {
           if (auto Sym2 = M.ClientResolver->findSymbolInLogicalDylib(*S)) {
-            SymbolFlags[S] = Sym2.getFlags();
+            if (!Sym2.getFlags().isStrong())
+              Result.insert(S);
           } else if (auto Err = Sym2.takeError()) {
             M.reportError(std::move(Err));
             return SymbolNameSet();
           } else
-            UnresolvedSymbols.insert(S);
+            Result.insert(S);
         }
       }
 
-      return UnresolvedSymbols;
+      return Result;
     }
 
     SymbolNameSet lookup(std::shared_ptr<AsynchronousSymbolQuery> Query,
                          SymbolNameSet Symbols) override {
       SymbolNameSet UnresolvedSymbols;
+      bool NewSymbolsResolved = false;
 
       for (auto &S : Symbols) {
         if (auto Sym = M.findMangledSymbol(*S)) {
-          if (auto Addr = Sym.getAddress())
-            Query->setDefinition(S, JITEvaluatedSymbol(*Addr, Sym.getFlags()));
-          else {
-            Query->setFailed(Addr.takeError());
+          if (auto Addr = Sym.getAddress()) {
+            Query->resolve(S, JITEvaluatedSymbol(*Addr, Sym.getFlags()));
+            Query->notifySymbolReady();
+            NewSymbolsResolved = true;
+          } else {
+            M.ES.legacyFailQuery(*Query, Addr.takeError());
             return SymbolNameSet();
           }
         } else if (auto Err = Sym.takeError()) {
-          Query->setFailed(std::move(Err));
+          M.ES.legacyFailQuery(*Query, std::move(Err));
           return SymbolNameSet();
         } else {
           if (auto Sym2 = M.ClientResolver->findSymbol(*S)) {
-            if (auto Addr = Sym2.getAddress())
-              Query->setDefinition(S,
-                                   JITEvaluatedSymbol(*Addr, Sym2.getFlags()));
-            else {
-              Query->setFailed(Addr.takeError());
+            if (auto Addr = Sym2.getAddress()) {
+              Query->resolve(S, JITEvaluatedSymbol(*Addr, Sym2.getFlags()));
+              Query->notifySymbolReady();
+              NewSymbolsResolved = true;
+            } else {
+              M.ES.legacyFailQuery(*Query, Addr.takeError());
               return SymbolNameSet();
             }
           } else if (auto Err = Sym2.takeError()) {
-            Query->setFailed(std::move(Err));
+            M.ES.legacyFailQuery(*Query, std::move(Err));
             return SymbolNameSet();
           } else
             UnresolvedSymbols.insert(S);
         }
       }
+
+      if (NewSymbolsResolved && Query->isFullyResolved())
+        Query->handleFullyResolved();
+
+      if (NewSymbolsResolved && Query->isFullyReady())
+        Query->handleFullyReady();
 
       return UnresolvedSymbols;
     }
@@ -223,7 +236,8 @@ public:
   OrcMCJITReplacement(std::shared_ptr<MCJITMemoryManager> MemMgr,
                       std::shared_ptr<LegacyJITSymbolResolver> ClientResolver,
                       std::unique_ptr<TargetMachine> TM)
-      : ExecutionEngine(TM->createDataLayout()), ES(SSP), TM(std::move(TM)),
+      : ExecutionEngine(TM->createDataLayout()),
+        TM(std::move(TM)),
         MemMgr(
             std::make_shared<MCJITReplacementMemMgr>(*this, std::move(MemMgr))),
         Resolver(std::make_shared<LinkingORCResolver>(*this)),
@@ -235,7 +249,10 @@ public:
               return ObjectLayerT::Resources{this->MemMgr, this->Resolver};
             },
             NotifyObjectLoaded, NotifyFinalized),
-        CompileLayer(ObjectLayer, SimpleCompiler(*this->TM)),
+        CompileLayer(ObjectLayer, SimpleCompiler(*this->TM),
+                     [this](VModuleKey K, std::unique_ptr<Module> M) {
+                       Modules.push_back(std::move(M));
+                     }),
         LazyEmitLayer(CompileLayer) {}
 
   static void Register() {
@@ -250,44 +267,63 @@ public:
     } else {
       assert(M->getDataLayout() == getDataLayout() && "DataLayout Mismatch");
     }
-    auto *MPtr = M.release();
-    ShouldDelete[MPtr] = true;
-    auto Deleter = [this](Module *Mod) {
-      auto I = ShouldDelete.find(Mod);
-      if (I != ShouldDelete.end() && I->second)
-        delete Mod;
-    };
-    LocalModules.push_back(std::shared_ptr<Module>(MPtr, std::move(Deleter)));
-    cantFail(
-        LazyEmitLayer.addModule(ES.allocateVModule(), LocalModules.back()));
+
+    // Rename, bump linkage and record static constructors and destructors.
+    // We have to do this before we hand over ownership of the module to the
+    // JIT.
+    std::vector<std::string> CtorNames, DtorNames;
+    {
+      unsigned CtorId = 0, DtorId = 0;
+      for (auto Ctor : orc::getConstructors(*M)) {
+        std::string NewCtorName = ("__ORCstatic_ctor." + Twine(CtorId++)).str();
+        Ctor.Func->setName(NewCtorName);
+        Ctor.Func->setLinkage(GlobalValue::ExternalLinkage);
+        Ctor.Func->setVisibility(GlobalValue::HiddenVisibility);
+        CtorNames.push_back(mangle(NewCtorName));
+      }
+      for (auto Dtor : orc::getDestructors(*M)) {
+        std::string NewDtorName = ("__ORCstatic_dtor." + Twine(DtorId++)).str();
+        dbgs() << "Found dtor: " << NewDtorName << "\n";
+        Dtor.Func->setName(NewDtorName);
+        Dtor.Func->setLinkage(GlobalValue::ExternalLinkage);
+        Dtor.Func->setVisibility(GlobalValue::HiddenVisibility);
+        DtorNames.push_back(mangle(NewDtorName));
+      }
+    }
+
+    auto K = ES.allocateVModule();
+
+    UnexecutedConstructors[K] = std::move(CtorNames);
+    UnexecutedDestructors[K] = std::move(DtorNames);
+
+    cantFail(LazyEmitLayer.addModule(K, std::move(M)));
   }
 
   void addObjectFile(std::unique_ptr<object::ObjectFile> O) override {
-    auto Obj =
-      std::make_shared<object::OwningBinary<object::ObjectFile>>(std::move(O),
-                                                                 nullptr);
-    cantFail(ObjectLayer.addObject(ES.allocateVModule(), std::move(Obj)));
+    cantFail(ObjectLayer.addObject(
+        ES.allocateVModule(), MemoryBuffer::getMemBufferCopy(O->getData())));
   }
 
   void addObjectFile(object::OwningBinary<object::ObjectFile> O) override {
-    auto Obj =
-      std::make_shared<object::OwningBinary<object::ObjectFile>>(std::move(O));
-    cantFail(ObjectLayer.addObject(ES.allocateVModule(), std::move(Obj)));
+    std::unique_ptr<object::ObjectFile> Obj;
+    std::unique_ptr<MemoryBuffer> ObjBuffer;
+    std::tie(Obj, ObjBuffer) = O.takeBinary();
+    cantFail(ObjectLayer.addObject(ES.allocateVModule(), std::move(ObjBuffer)));
   }
 
   void addArchive(object::OwningBinary<object::Archive> A) override {
     Archives.push_back(std::move(A));
   }
-  
+
   bool removeModule(Module *M) override {
-    for (auto I = LocalModules.begin(), E = LocalModules.end(); I != E; ++I) {
-      if (I->get() == M) {
-        ShouldDelete[M] = false;
-        LocalModules.erase(I);
-        return true;
-      }
-    }
-    return false;
+    auto I = Modules.begin();
+    for (auto E = Modules.end(); I != E; ++I)
+      if (I->get() == M)
+        break;
+    if (I == Modules.end())
+      return false;
+    Modules.erase(I);
+    return true;
   }
 
   uint64_t getSymbolAddress(StringRef Name) {
@@ -295,7 +331,7 @@ public:
   }
 
   JITSymbol findSymbol(StringRef Name) {
-    return findMangledSymbol(Mangle(Name));
+    return findMangledSymbol(mangle(Name));
   }
 
   void finalizeObject() override {
@@ -375,12 +411,9 @@ private:
         }
         std::unique_ptr<object::Binary> &ChildBin = ChildBinOrErr.get();
         if (ChildBin->isObject()) {
-          std::unique_ptr<object::ObjectFile> ChildObj(
-            static_cast<object::ObjectFile*>(ChildBinOrErr->release()));
-          auto Obj =
-            std::make_shared<object::OwningBinary<object::ObjectFile>>(
-              std::move(ChildObj), nullptr);
-          cantFail(ObjectLayer.addObject(ES.allocateVModule(), std::move(Obj)));
+          cantFail(ObjectLayer.addObject(
+              ES.allocateVModule(),
+              MemoryBuffer::getMemBufferCopy(ChildBin->getData())));
           if (auto Sym = ObjectLayer.findSymbol(Name, true))
             return Sym;
         }
@@ -396,12 +429,11 @@ private:
 
     NotifyObjectLoadedT(OrcMCJITReplacement &M) : M(M) {}
 
-    void operator()(VModuleKey K,
-                    const RTDyldObjectLinkingLayer::ObjectPtr &Obj,
+    void operator()(VModuleKey K, const object::ObjectFile &Obj,
                     const RuntimeDyld::LoadedObjectInfo &Info) const {
       M.UnfinalizedSections[K] = std::move(M.SectionsAllocatedSinceLastLoad);
       M.SectionsAllocatedSinceLastLoad = SectionAddrSet();
-      M.MemMgr->notifyObjectLoaded(&M, *Obj->getBinary());
+      M.MemMgr->notifyObjectLoaded(&M, Obj);
     }
   private:
     OrcMCJITReplacement &M;
@@ -411,13 +443,16 @@ private:
   public:
     NotifyFinalizedT(OrcMCJITReplacement &M) : M(M) {}
 
-    void operator()(VModuleKey K) { M.UnfinalizedSections.erase(K); }
+    void operator()(VModuleKey K, const object::ObjectFile &Obj,
+                    const RuntimeDyld::LoadedObjectInfo &Info) {
+      M.UnfinalizedSections.erase(K);
+    }
 
   private:
     OrcMCJITReplacement &M;
   };
 
-  std::string Mangle(StringRef Name) {
+  std::string mangle(StringRef Name) {
     std::string MangledName;
     {
       raw_string_ostream MangledNameStream(MangledName);
@@ -430,7 +465,6 @@ private:
   using CompileLayerT = IRCompileLayer<ObjectLayerT, orc::SimpleCompiler>;
   using LazyEmitLayerT = LazyEmittingLayer<CompileLayerT>;
 
-  SymbolStringPool SSP;
   ExecutionSession ES;
 
   std::unique_ptr<TargetMachine> TM;
@@ -443,7 +477,6 @@ private:
   // delete blocks in LocalModules refer to the ShouldDelete map, so
   // LocalModules needs to be destructed before ShouldDelete.
   std::map<Module*, bool> ShouldDelete;
-  std::vector<std::shared_ptr<Module>> LocalModules;
 
   NotifyObjectLoadedT NotifyObjectLoaded;
   NotifyFinalizedT NotifyFinalized;
@@ -451,6 +484,9 @@ private:
   ObjectLayerT ObjectLayer;
   CompileLayerT CompileLayer;
   LazyEmitLayerT LazyEmitLayer;
+
+  std::map<VModuleKey, std::vector<std::string>> UnexecutedConstructors;
+  std::map<VModuleKey, std::vector<std::string>> UnexecutedDestructors;
 
   // We need to store ObjLayerT::ObjSetHandles for each of the object sets
   // that have been emitted but not yet finalized so that we can forward the

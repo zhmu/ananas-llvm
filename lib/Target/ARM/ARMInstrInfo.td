@@ -253,6 +253,8 @@ def HasV8_2a         : Predicate<"Subtarget->hasV8_2aOps()">,
                                  AssemblerPredicate<"HasV8_2aOps", "armv8.2a">;
 def HasV8_3a         : Predicate<"Subtarget->hasV8_3aOps()">,
                                  AssemblerPredicate<"HasV8_3aOps", "armv8.3a">;
+def HasV8_4a         : Predicate<"Subtarget->hasV8_4aOps()">,
+                                 AssemblerPredicate<"HasV8_4aOps", "armv8.4a">;
 def NoVFP            : Predicate<"!Subtarget->hasVFP2()">;
 def HasVFP2          : Predicate<"Subtarget->hasVFP2()">,
                                  AssemblerPredicate<"FeatureVFP2", "VFP2">;
@@ -267,6 +269,10 @@ def HasFPARMv8       : Predicate<"Subtarget->hasFPARMv8()">,
                                  AssemblerPredicate<"FeatureFPARMv8", "FPARMv8">;
 def HasNEON          : Predicate<"Subtarget->hasNEON()">,
                                  AssemblerPredicate<"FeatureNEON", "NEON">;
+def HasSHA2          : Predicate<"Subtarget->hasSHA2()">,
+                                 AssemblerPredicate<"FeatureSHA2", "sha2">;
+def HasAES           : Predicate<"Subtarget->hasAES()">,
+                                 AssemblerPredicate<"FeatureAES", "aes">;
 def HasCrypto        : Predicate<"Subtarget->hasCrypto()">,
                                  AssemblerPredicate<"FeatureCrypto", "crypto">;
 def HasDotProd       : Predicate<"Subtarget->hasDotProd()">,
@@ -279,6 +285,8 @@ def HasFP16          : Predicate<"Subtarget->hasFP16()">,
                                  AssemblerPredicate<"FeatureFP16","half-float conversions">;
 def HasFullFP16      : Predicate<"Subtarget->hasFullFP16()">,
                                  AssemblerPredicate<"FeatureFullFP16","full half-float">;
+def HasFP16FML       : Predicate<"Subtarget->hasFP16FML()">,
+                                 AssemblerPredicate<"FeatureFP16FML","full half-float fml">;
 def HasDivideInThumb : Predicate<"Subtarget->hasDivideInThumbMode()">,
                                  AssemblerPredicate<"FeatureHWDivThumb", "divide in THUMB">;
 def HasDivideInARM   : Predicate<"Subtarget->hasDivideInARMMode()">,
@@ -883,6 +891,16 @@ def bf_inv_mask_imm : Operand<i32>,
   let PrintMethod = "printBitfieldInvMaskImmOperand";
   let DecoderMethod = "DecodeBitfieldMaskOperand";
   let ParserMatchClass = BitfieldAsmOperand;
+  let GISelPredicateCode = [{
+    // There's better methods of implementing this check. IntImmLeaf<> would be
+    // equivalent and have less boilerplate but we need a test for C++
+    // predicates and this one causes new rules to be imported into GlobalISel
+    // without requiring additional features first.
+    const auto &MO = MI.getOperand(1);
+    if (!MO.isCImm())
+      return false;
+    return ARM::isBitFieldInvertedMask(MO.getCImm()->getZExtValue());
+  }];
 }
 
 def imm1_32_XFORM: SDNodeXForm<imm, [{
@@ -3340,7 +3358,7 @@ defm sysSTM : arm_ldst_mult<"stm", " ^", 0, 1, LdStMulFrm, IIC_iStore_m,
 //  Move Instructions.
 //
 
-let hasSideEffects = 0 in
+let hasSideEffects = 0, isMoveReg = 1 in
 def MOVr : AsI1<0b1101, (outs GPR:$Rd), (ins GPR:$Rm), DPFrm, IIC_iMOVr,
                 "mov", "\t$Rd, $Rm", []>, UnaryDP, Sched<[WriteALU]> {
   bits<4> Rd;
@@ -3503,10 +3521,14 @@ def : ARMV6Pat<(add rGPR:$Rn, (sext_inreg (srl rGPR:$Rm, imm8_or_16:$rot),
 def SXTB16  : AI_ext_rrot_np<0b01101000, "sxtb16">;
 def : ARMV6Pat<(int_arm_sxtb16 GPR:$Src),
                (SXTB16 GPR:$Src, 0)>;
+def : ARMV6Pat<(int_arm_sxtb16 (rotr GPR:$Src, rot_imm:$rot)),
+               (SXTB16 GPR:$Src, rot_imm:$rot)>;
 
 def SXTAB16 : AI_exta_rrot_np<0b01101000, "sxtab16">;
 def : ARMV6Pat<(int_arm_sxtab16 GPR:$LHS, GPR:$RHS),
                (SXTAB16 GPR:$LHS, GPR:$RHS, 0)>;
+def : ARMV6Pat<(int_arm_sxtab16 GPR:$LHS, (rotr GPR:$RHS, rot_imm:$rot)),
+               (SXTAB16 GPR:$LHS, GPR:$RHS, rot_imm:$rot)>;
 
 // Zero extenders
 
@@ -3528,6 +3550,8 @@ def : ARMV6Pat<(and (srl GPR:$Src, (i32 8)), 0xFF00FF),
                (UXTB16 GPR:$Src, 1)>;
 def : ARMV6Pat<(int_arm_uxtb16 GPR:$Src),
                (UXTB16 GPR:$Src, 0)>;
+def : ARMV6Pat<(int_arm_uxtb16 (rotr GPR:$Src, rot_imm:$rot)),
+               (UXTB16 GPR:$Src, rot_imm:$rot)>;
 
 def UXTAB : AI_exta_rrot<0b01101110, "uxtab",
                         BinOpFrag<(add node:$LHS, (and node:$RHS, 0x00FF))>>;
@@ -3544,6 +3568,8 @@ def : ARMV6Pat<(add rGPR:$Rn, (and (srl rGPR:$Rm, imm8_or_16:$rot), 0xFFFF)),
 def UXTAB16 : AI_exta_rrot_np<0b01101100, "uxtab16">;
 def : ARMV6Pat<(int_arm_uxtab16 GPR:$LHS, GPR:$RHS),
                (UXTAB16 GPR:$LHS, GPR:$RHS, 0)>;
+def : ARMV6Pat<(int_arm_uxtab16 GPR:$LHS, (rotr GPR:$RHS, rot_imm:$rot)),
+               (UXTAB16 GPR:$LHS, GPR:$RHS, rot_imm:$rot)>;
 
 
 def SBFX  : I<(outs GPRnopc:$Rd),
@@ -4803,6 +4829,15 @@ def instsyncb_opt : Operand<i32> {
   let DecoderMethod = "DecodeInstSyncBarrierOption";
 }
 
+def TraceSyncBarrierOptOperand : AsmOperandClass {
+  let Name = "TraceSyncBarrierOpt";
+  let ParserMethod = "parseTraceSyncBarrierOptOperand";
+}
+def tsb_opt : Operand<i32> {
+  let PrintMethod = "printTraceSyncBOption";
+  let ParserMatchClass = TraceSyncBarrierOptOperand;
+}
+
 // Memory barriers protect the atomic sequences
 let hasSideEffects = 1 in {
 def DMB : AInoP<(outs), (ins memb_opt:$opt), MiscFrm, NoItinerary,
@@ -4829,6 +4864,13 @@ def ISB : AInoP<(outs), (ins instsyncb_opt:$opt), MiscFrm, NoItinerary,
   let Inst{31-4} = 0xf57ff06;
   let Inst{3-0} = opt;
 }
+
+let hasNoSchedulingInfo = 1 in
+def TSB : AInoP<(outs), (ins tsb_opt:$opt), MiscFrm, NoItinerary,
+                "tsb", "\t$opt", []>, Requires<[IsARM, HasV8_4a]> {
+  let Inst{31-0} = 0xe320f012;
+}
+
 }
 
 let usesCustomInserter = 1, Defs = [CPSR] in {

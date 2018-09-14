@@ -22,8 +22,8 @@
 namespace llvm {
 namespace codeview {
 
-/// Distinguishes individual records in .debug$T section or PDB type stream. The
-/// documentation and headers talk about this as the "leaf" type.
+/// Distinguishes individual records in .debug$T or .debug$P section or PDB type
+/// stream. The documentation and headers talk about this as the "leaf" type.
 enum class TypeRecordKind : uint16_t {
 #define TYPE_RECORD(lf_ename, value, name) name = value,
 #include "CodeViewTypes.def"
@@ -231,6 +231,8 @@ enum class FrameProcedureOptions : uint32_t {
   Inlined = 0x00000800,
   StrictSecurityChecks = 0x00001000,
   SafeBuffers = 0x00002000,
+  EncodedLocalBasePointerMask = 0x0000C000,
+  EncodedParamBasePointerMask = 0x00030000,
   ProfileGuidedOptimization = 0x00040000,
   ValidProfileCounts = 0x00080000,
   OptimizedForSpeed = 0x00100000,

@@ -39,12 +39,12 @@ define void @add512(<16 x i32>* %a, <16 x i32>* %b, <16 x i32>* %c) "required-ve
 define void @avg_v64i8_256(<64 x i8>* %a, <64 x i8>* %b) "required-vector-width"="256" {
 ; CHECK-LABEL: avg_v64i8_256:
 ; CHECK:       # %bb.0:
-; CHECK-NEXT:    vmovdqa 32(%rdi), %ymm0
-; CHECK-NEXT:    vmovdqa (%rsi), %ymm1
-; CHECK-NEXT:    vpavgb (%rdi), %ymm1, %ymm1
-; CHECK-NEXT:    vpavgb 32(%rsi), %ymm0, %ymm0
-; CHECK-NEXT:    vmovdqu %ymm0, (%rax)
+; CHECK-NEXT:    vmovdqa (%rsi), %ymm0
+; CHECK-NEXT:    vmovdqa 32(%rsi), %ymm1
+; CHECK-NEXT:    vpavgb (%rdi), %ymm0, %ymm0
+; CHECK-NEXT:    vpavgb 32(%rdi), %ymm1, %ymm1
 ; CHECK-NEXT:    vmovdqu %ymm1, (%rax)
+; CHECK-NEXT:    vmovdqu %ymm0, (%rax)
 ; CHECK-NEXT:    vzeroupper
 ; CHECK-NEXT:    retq
   %1 = load <64 x i8>, <64 x i8>* %a
@@ -168,33 +168,24 @@ define i32 @_Z9test_charPcS_i_256(i8* nocapture readonly, i8* nocapture readonly
 ; CHECK-NEXT:    xorl %ecx, %ecx
 ; CHECK-NEXT:    vpxor %xmm1, %xmm1, %xmm1
 ; CHECK-NEXT:    vpxor %xmm2, %xmm2, %xmm2
-; CHECK-NEXT:    vpxor %xmm3, %xmm3, %xmm3
 ; CHECK-NEXT:    .p2align 4, 0x90
 ; CHECK-NEXT:  .LBB8_1: # %vector.body
 ; CHECK-NEXT:    # =>This Inner Loop Header: Depth=1
-; CHECK-NEXT:    vpmovsxbw (%rdi,%rcx), %xmm4
-; CHECK-NEXT:    vpmovsxbw 8(%rdi,%rcx), %xmm5
-; CHECK-NEXT:    vpmovsxbw 16(%rdi,%rcx), %xmm6
-; CHECK-NEXT:    vpmovsxbw 24(%rdi,%rcx), %xmm8
-; CHECK-NEXT:    vpmovsxbw (%rsi,%rcx), %xmm7
-; CHECK-NEXT:    vpmaddwd %xmm4, %xmm7, %xmm4
-; CHECK-NEXT:    vpmovsxbw 8(%rsi,%rcx), %xmm7
-; CHECK-NEXT:    vpmaddwd %xmm5, %xmm7, %xmm5
-; CHECK-NEXT:    vpmovsxbw 16(%rsi,%rcx), %xmm7
-; CHECK-NEXT:    vpmaddwd %xmm6, %xmm7, %xmm6
-; CHECK-NEXT:    vpmovsxbw 24(%rsi,%rcx), %xmm7
-; CHECK-NEXT:    vpmaddwd %xmm8, %xmm7, %xmm7
-; CHECK-NEXT:    vpaddd %ymm3, %ymm7, %ymm3
-; CHECK-NEXT:    vpaddd %ymm2, %ymm6, %ymm2
-; CHECK-NEXT:    vpaddd %ymm1, %ymm5, %ymm1
-; CHECK-NEXT:    vpaddd %ymm0, %ymm4, %ymm0
+; CHECK-NEXT:    vpmovsxbw (%rdi,%rcx), %ymm3
+; CHECK-NEXT:    vpmovsxbw 16(%rdi,%rcx), %ymm4
+; CHECK-NEXT:    vpmovsxbw (%rsi,%rcx), %ymm5
+; CHECK-NEXT:    vpmaddwd %ymm3, %ymm5, %ymm3
+; CHECK-NEXT:    vpaddd %ymm1, %ymm3, %ymm1
+; CHECK-NEXT:    vpmovsxbw 16(%rsi,%rcx), %ymm3
+; CHECK-NEXT:    vpmaddwd %ymm4, %ymm3, %ymm3
+; CHECK-NEXT:    vpaddd %ymm2, %ymm3, %ymm2
 ; CHECK-NEXT:    addq $32, %rcx
 ; CHECK-NEXT:    cmpq %rcx, %rax
 ; CHECK-NEXT:    jne .LBB8_1
 ; CHECK-NEXT:  # %bb.2: # %middle.block
-; CHECK-NEXT:    vpaddd %ymm2, %ymm0, %ymm0
-; CHECK-NEXT:    vpaddd %ymm3, %ymm1, %ymm1
-; CHECK-NEXT:    vpaddd %ymm1, %ymm0, %ymm0
+; CHECK-NEXT:    vpaddd %ymm0, %ymm1, %ymm1
+; CHECK-NEXT:    vpaddd %ymm0, %ymm2, %ymm0
+; CHECK-NEXT:    vpaddd %ymm0, %ymm1, %ymm0
 ; CHECK-NEXT:    vextracti128 $1, %ymm0, %xmm1
 ; CHECK-NEXT:    vpaddd %ymm1, %ymm0, %ymm0
 ; CHECK-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[2,3,0,1]
@@ -614,7 +605,7 @@ define <16 x i16> @test_16f32toub_512(<16 x float>* %ptr, <16 x i16> %passthru) 
 ; CHECK:       # %bb.0:
 ; CHECK-NEXT:    vcvttps2dq (%rdi), %zmm1
 ; CHECK-NEXT:    vpslld $31, %zmm1, %zmm1
-; CHECK-NEXT:    vptestmd %zmm1, %zmm1, %k1
+; CHECK-NEXT:    vpmovd2m %zmm1, %k1
 ; CHECK-NEXT:    vmovdqu16 %ymm0, %ymm0 {%k1} {z}
 ; CHECK-NEXT:    retq
   %a = load <16 x float>, <16 x float>* %ptr
@@ -645,7 +636,7 @@ define <16 x i16> @test_16f32tosb_512(<16 x float>* %ptr, <16 x i16> %passthru) 
 ; CHECK-LABEL: test_16f32tosb_512:
 ; CHECK:       # %bb.0:
 ; CHECK-NEXT:    vcvttps2dq (%rdi), %zmm1
-; CHECK-NEXT:    vptestmd %zmm1, %zmm1, %k1
+; CHECK-NEXT:    vpmovd2m %zmm1, %k1
 ; CHECK-NEXT:    vmovdqu16 %ymm0, %ymm0 {%k1} {z}
 ; CHECK-NEXT:    retq
   %a = load <16 x float>, <16 x float>* %ptr

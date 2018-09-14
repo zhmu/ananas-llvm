@@ -8,15 +8,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/DebugInfo/PDB/Native/NativeRawSymbol.h"
+#include "llvm/DebugInfo/PDB/IPDBLineNumber.h"
 #include "llvm/DebugInfo/PDB/PDBSymbolTypeBuiltin.h"
+#include "llvm/Support/FormatVariadic.h"
 
 using namespace llvm;
 using namespace llvm::pdb;
 
-NativeRawSymbol::NativeRawSymbol(NativeSession &PDBSession, SymIndexId SymbolId)
-    : Session(PDBSession), SymbolId(SymbolId) {}
+NativeRawSymbol::NativeRawSymbol(NativeSession &PDBSession, PDB_SymType Tag,
+                                 SymIndexId SymbolId)
+    : Session(PDBSession), Tag(Tag), SymbolId(SymbolId) {}
 
-void NativeRawSymbol::dump(raw_ostream &OS, int Indent) const {}
+void NativeRawSymbol::dump(raw_ostream &OS, int Indent) const {
+  dumpSymbolField(OS, "symIndexId", SymbolId, Indent);
+  dumpSymbolField(OS, "symTag", static_cast<uint32_t>(Tag), Indent);
+}
 
 std::unique_ptr<IPDBEnumSymbols>
 NativeRawSymbol::findChildren(PDB_SymType Type) const {
@@ -30,13 +36,57 @@ NativeRawSymbol::findChildren(PDB_SymType Type, StringRef Name,
 }
 
 std::unique_ptr<IPDBEnumSymbols>
+NativeRawSymbol::findChildrenByAddr(PDB_SymType Type, StringRef Name,
+    PDB_NameSearchFlags Flags, uint32_t Section, uint32_t Offset) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumSymbols>
+NativeRawSymbol::findChildrenByVA(PDB_SymType Type, StringRef Name,
+   PDB_NameSearchFlags Flags, uint64_t VA) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumSymbols>
 NativeRawSymbol::findChildrenByRVA(PDB_SymType Type, StringRef Name,
     PDB_NameSearchFlags Flags, uint32_t RVA) const {
   return nullptr;
 }
 
 std::unique_ptr<IPDBEnumSymbols>
+NativeRawSymbol::findInlineFramesByAddr(uint32_t Section,
+                                        uint32_t Offset) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumSymbols>
 NativeRawSymbol::findInlineFramesByRVA(uint32_t RVA) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumSymbols>
+NativeRawSymbol::findInlineFramesByVA(uint64_t VA) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumLineNumbers>
+NativeRawSymbol::findInlineeLines() const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumLineNumbers>
+NativeRawSymbol::findInlineeLinesByAddr(uint32_t Section, uint32_t Offset,
+                                        uint32_t Length) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumLineNumbers>
+NativeRawSymbol::findInlineeLinesByRVA(uint32_t RVA, uint32_t Length) const {
+  return nullptr;
+}
+
+std::unique_ptr<IPDBEnumLineNumbers>
+NativeRawSymbol::findInlineeLinesByVA(uint64_t VA, uint32_t Length) const {
   return nullptr;
 }
 
@@ -60,9 +110,7 @@ uint32_t NativeRawSymbol::getAge() const {
   return 0;
 }
 
-uint32_t NativeRawSymbol::getArrayIndexTypeId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getArrayIndexTypeId() const { return 0; }
 
 void NativeRawSymbol::getBackEndVersion(VersionInfo &Version) const {
   Version.Major = 0;
@@ -79,9 +127,7 @@ uint32_t NativeRawSymbol::getBaseDataSlot() const {
   return 0;
 }
 
-uint32_t NativeRawSymbol::getBaseSymbolId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getBaseSymbolId() const { return 0; }
 
 PDB_BuiltinType NativeRawSymbol::getBuiltinType() const {
   return PDB_BuiltinType::None;
@@ -95,9 +141,7 @@ PDB_CallingConv NativeRawSymbol::getCallingConvention() const {
   return PDB_CallingConv::FarStdCall;
 }
 
-uint32_t NativeRawSymbol::getClassParentId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getClassParentId() const { return 0; }
 
 std::string NativeRawSymbol::getCompilerName() const {
   return {};
@@ -122,9 +166,7 @@ PDB_Lang NativeRawSymbol::getLanguage() const {
   return PDB_Lang::Cobol;
 }
 
-uint32_t NativeRawSymbol::getLexicalParentId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getLexicalParentId() const { return 0; }
 
 std::string NativeRawSymbol::getLibraryName() const {
   return {};
@@ -146,9 +188,7 @@ codeview::RegisterId NativeRawSymbol::getLocalBasePointerRegisterId() const {
   return codeview::RegisterId::EAX;
 }
 
-uint32_t NativeRawSymbol::getLowerBoundId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getLowerBoundId() const { return 0; }
 
 uint32_t NativeRawSymbol::getMemorySpaceKind() const {
   return 0;
@@ -186,9 +226,7 @@ uint32_t NativeRawSymbol::getOemId() const {
   return 0;
 }
 
-uint32_t NativeRawSymbol::getOemSymbolId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getOemSymbolId() const { return 0; }
 
 uint32_t NativeRawSymbol::getOffsetInUdt() const {
   return 0;
@@ -234,17 +272,20 @@ std::string NativeRawSymbol::getSourceFileName() const {
   return {};
 }
 
+std::unique_ptr<IPDBLineNumber>
+NativeRawSymbol::getSrcLineOnTypeDefn() const {
+  return nullptr;
+}
+
 uint32_t NativeRawSymbol::getStride() const {
   return 0;
 }
 
-uint32_t NativeRawSymbol::getSubTypeId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getSubTypeId() const { return 0; }
 
 std::string NativeRawSymbol::getSymbolsFileName() const { return {}; }
 
-uint32_t NativeRawSymbol::getSymIndexId() const { return SymbolId; }
+SymIndexId NativeRawSymbol::getSymIndexId() const { return SymbolId; }
 
 uint32_t NativeRawSymbol::getTargetOffset() const {
   return 0;
@@ -274,9 +315,7 @@ uint32_t NativeRawSymbol::getToken() const {
   return 0;
 }
 
-uint32_t NativeRawSymbol::getTypeId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getTypeId() const { return 0; }
 
 uint32_t NativeRawSymbol::getUavSlot() const {
   return 0;
@@ -291,13 +330,9 @@ std::string NativeRawSymbol::getUndecoratedNameEx(
   return {};
 }
 
-uint32_t NativeRawSymbol::getUnmodifiedTypeId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getUnmodifiedTypeId() const { return 0; }
 
-uint32_t NativeRawSymbol::getUpperBoundId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getUpperBoundId() const { return 0; }
 
 Variant NativeRawSymbol::getValue() const {
   return Variant();
@@ -311,9 +346,7 @@ uint32_t NativeRawSymbol::getVirtualBaseOffset() const {
   return 0;
 }
 
-uint32_t NativeRawSymbol::getVirtualTableShapeId() const {
-  return 0;
-}
+SymIndexId NativeRawSymbol::getVirtualTableShapeId() const { return 0; }
 
 std::unique_ptr<PDBSymbolTypeBuiltin>
 NativeRawSymbol::getVirtualBaseTableType() const {
@@ -324,9 +357,7 @@ PDB_DataKind NativeRawSymbol::getDataKind() const {
   return PDB_DataKind::Unknown;
 }
 
-PDB_SymType NativeRawSymbol::getSymTag() const {
-  return PDB_SymType::None;
-}
+PDB_SymType NativeRawSymbol::getSymTag() const { return Tag; }
 
 codeview::GUID NativeRawSymbol::getGuid() const { return codeview::GUID{{0}}; }
 

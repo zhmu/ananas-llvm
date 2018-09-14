@@ -14,13 +14,16 @@
 
 #include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/TargetParser.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include <cctype>
 
 using namespace llvm;
 using namespace ARM;
 using namespace AArch64;
+using namespace AMDGPU;
 
 namespace {
 
@@ -234,6 +237,11 @@ bool llvm::ARM::getExtensionFeatures(unsigned Extensions,
   else
     Features.push_back("-dsp");
 
+  if (Extensions & ARM::AEK_FP16FML)
+    Features.push_back("+fp16fml");
+  else
+    Features.push_back("-fp16fml");
+
   if (Extensions & ARM::AEK_RAS)
     Features.push_back("+ras");
   else
@@ -433,6 +441,17 @@ unsigned llvm::AArch64::getDefaultExtensions(StringRef CPU, ArchKind AK) {
     .Default(AArch64::AEK_INVALID);
 }
 
+AArch64::ArchKind llvm::AArch64::getCPUArchKind(StringRef CPU) {
+  if (CPU == "generic")
+    return AArch64::ArchKind::ARMV8A;
+
+  return StringSwitch<AArch64::ArchKind>(CPU)
+#define AARCH64_CPU_NAME(NAME, ID, DEFAULT_FPU, IS_DEFAULT, DEFAULT_EXT) \
+  .Case(NAME, AArch64::ArchKind:: ID)
+#include "llvm/Support/AArch64TargetParser.def"
+    .Default(AArch64::ArchKind::INVALID);
+}
+
 bool llvm::AArch64::getExtensionFeatures(unsigned Extensions,
                                      std::vector<StringRef> &Features) {
 
@@ -449,6 +468,8 @@ bool llvm::AArch64::getExtensionFeatures(unsigned Extensions,
     Features.push_back("+crypto");
   if (Extensions & AArch64::AEK_DOTPROD)
     Features.push_back("+dotprod");
+  if (Extensions & AArch64::AEK_FP16FML)
+    Features.push_back("+fp16fml");
   if (Extensions & AArch64::AEK_FP16)
     Features.push_back("+fullfp16");
   if (Extensions & AArch64::AEK_PROFILE)
@@ -480,6 +501,8 @@ bool llvm::AArch64::getArchFeatures(AArch64::ArchKind AK,
     Features.push_back("+v8.2a");
   if (AK == AArch64::ArchKind::ARMV8_3A)
     Features.push_back("+v8.3a");
+  if (AK == AArch64::ArchKind::ARMV8_4A)
+    Features.push_back("+v8.4a");
 
   return AK != AArch64::ArchKind::INVALID;
 }
@@ -585,6 +608,7 @@ static StringRef getArchSynonym(StringRef Arch) {
       .Case("v8.1a", "v8.1-a")
       .Case("v8.2a", "v8.2-a")
       .Case("v8.3a", "v8.3-a")
+      .Case("v8.4a", "v8.4-a")
       .Case("v8r", "v8-r")
       .Case("v8m.base", "v8-m.base")
       .Case("v8m.main", "v8-m.main")
@@ -752,6 +776,7 @@ ARM::ProfileKind ARM::parseArchProfile(StringRef Arch) {
   case ARM::ArchKind::ARMV8_1A:
   case ARM::ArchKind::ARMV8_2A:
   case ARM::ArchKind::ARMV8_3A:
+  case ARM::ArchKind::ARMV8_4A:
     return ARM::ProfileKind::A;
   case ARM::ArchKind::ARMV2:
   case ARM::ArchKind::ARMV2A:
@@ -814,6 +839,7 @@ unsigned llvm::ARM::parseArchVersion(StringRef Arch) {
   case ARM::ArchKind::ARMV8_1A:
   case ARM::ArchKind::ARMV8_2A:
   case ARM::ArchKind::ARMV8_3A:
+  case ARM::ArchKind::ARMV8_4A:
   case ARM::ArchKind::ARMV8R:
   case ARM::ArchKind::ARMV8MBaseline:
   case ARM::ArchKind::ARMV8MMainline:
@@ -916,4 +942,271 @@ ARM::ProfileKind AArch64::parseArchProfile(StringRef Arch) {
 // Version number (ex. v8 = 8).
 unsigned llvm::AArch64::parseArchVersion(StringRef Arch) {
   return ARM::parseArchVersion(Arch);
+}
+
+bool llvm::AArch64::isX18ReservedByDefault(const Triple &TT) {
+  return TT.isAndroid() || TT.isOSDarwin() || TT.isOSFuchsia() ||
+         TT.isOSWindows();
+}
+
+namespace {
+
+struct GPUInfo {
+  StringLiteral Name;
+  StringLiteral CanonicalName;
+  AMDGPU::GPUKind Kind;
+  unsigned Features;
+};
+
+constexpr GPUInfo R600GPUs[26] = {
+  // Name       Canonical    Kind        Features
+  //            Name
+  {{"r600"},    {"r600"},    GK_R600,    FEATURE_NONE },
+  {{"rv630"},   {"r600"},    GK_R600,    FEATURE_NONE },
+  {{"rv635"},   {"r600"},    GK_R600,    FEATURE_NONE },
+  {{"r630"},    {"r630"},    GK_R630,    FEATURE_NONE },
+  {{"rs780"},   {"rs880"},   GK_RS880,   FEATURE_NONE },
+  {{"rs880"},   {"rs880"},   GK_RS880,   FEATURE_NONE },
+  {{"rv610"},   {"rs880"},   GK_RS880,   FEATURE_NONE },
+  {{"rv620"},   {"rs880"},   GK_RS880,   FEATURE_NONE },
+  {{"rv670"},   {"rv670"},   GK_RV670,   FEATURE_NONE },
+  {{"rv710"},   {"rv710"},   GK_RV710,   FEATURE_NONE },
+  {{"rv730"},   {"rv730"},   GK_RV730,   FEATURE_NONE },
+  {{"rv740"},   {"rv770"},   GK_RV770,   FEATURE_NONE },
+  {{"rv770"},   {"rv770"},   GK_RV770,   FEATURE_NONE },
+  {{"cedar"},   {"cedar"},   GK_CEDAR,   FEATURE_NONE },
+  {{"palm"},    {"cedar"},   GK_CEDAR,   FEATURE_NONE },
+  {{"cypress"}, {"cypress"}, GK_CYPRESS, FEATURE_FMA  },
+  {{"hemlock"}, {"cypress"}, GK_CYPRESS, FEATURE_FMA  },
+  {{"juniper"}, {"juniper"}, GK_JUNIPER, FEATURE_NONE },
+  {{"redwood"}, {"redwood"}, GK_REDWOOD, FEATURE_NONE },
+  {{"sumo"},    {"sumo"},    GK_SUMO,    FEATURE_NONE },
+  {{"sumo2"},   {"sumo"},    GK_SUMO,    FEATURE_NONE },
+  {{"barts"},   {"barts"},   GK_BARTS,   FEATURE_NONE },
+  {{"caicos"},  {"caicos"},  GK_CAICOS,  FEATURE_NONE },
+  {{"aruba"},   {"cayman"},  GK_CAYMAN,  FEATURE_FMA  },
+  {{"cayman"},  {"cayman"},  GK_CAYMAN,  FEATURE_FMA  },
+  {{"turks"},   {"turks"},   GK_TURKS,   FEATURE_NONE }
+};
+
+// This table should be sorted by the value of GPUKind
+// Don't bother listing the implicitly true features
+constexpr GPUInfo AMDGCNGPUs[32] = {
+  // Name         Canonical    Kind        Features
+  //              Name
+  {{"gfx600"},    {"gfx600"},  GK_GFX600,  FEATURE_FAST_FMA_F32},
+  {{"tahiti"},    {"gfx600"},  GK_GFX600,  FEATURE_FAST_FMA_F32},
+  {{"gfx601"},    {"gfx601"},  GK_GFX601,  FEATURE_NONE},
+  {{"hainan"},    {"gfx601"},  GK_GFX601,  FEATURE_NONE},
+  {{"oland"},     {"gfx601"},  GK_GFX601,  FEATURE_NONE},
+  {{"pitcairn"},  {"gfx601"},  GK_GFX601,  FEATURE_NONE},
+  {{"verde"},     {"gfx601"},  GK_GFX601,  FEATURE_NONE},
+  {{"gfx700"},    {"gfx700"},  GK_GFX700,  FEATURE_NONE},
+  {{"kaveri"},    {"gfx700"},  GK_GFX700,  FEATURE_NONE},
+  {{"gfx701"},    {"gfx701"},  GK_GFX701,  FEATURE_FAST_FMA_F32},
+  {{"hawaii"},    {"gfx701"},  GK_GFX701,  FEATURE_FAST_FMA_F32},
+  {{"gfx702"},    {"gfx702"},  GK_GFX702,  FEATURE_FAST_FMA_F32},
+  {{"gfx703"},    {"gfx703"},  GK_GFX703,  FEATURE_NONE},
+  {{"kabini"},    {"gfx703"},  GK_GFX703,  FEATURE_NONE},
+  {{"mullins"},   {"gfx703"},  GK_GFX703,  FEATURE_NONE},
+  {{"gfx704"},    {"gfx704"},  GK_GFX704,  FEATURE_NONE},
+  {{"bonaire"},   {"gfx704"},  GK_GFX704,  FEATURE_NONE},
+  {{"gfx801"},    {"gfx801"},  GK_GFX801,  FEATURE_FAST_FMA_F32|FEATURE_FAST_DENORMAL_F32},
+  {{"carrizo"},   {"gfx801"},  GK_GFX801,  FEATURE_FAST_FMA_F32|FEATURE_FAST_DENORMAL_F32},
+  {{"gfx802"},    {"gfx802"},  GK_GFX802,  FEATURE_FAST_DENORMAL_F32},
+  {{"iceland"},   {"gfx802"},  GK_GFX802,  FEATURE_FAST_DENORMAL_F32},
+  {{"tonga"},     {"gfx802"},  GK_GFX802,  FEATURE_FAST_DENORMAL_F32},
+  {{"gfx803"},    {"gfx803"},  GK_GFX803,  FEATURE_FAST_DENORMAL_F32},
+  {{"fiji"},      {"gfx803"},  GK_GFX803,  FEATURE_FAST_DENORMAL_F32},
+  {{"polaris10"}, {"gfx803"},  GK_GFX803,  FEATURE_FAST_DENORMAL_F32},
+  {{"polaris11"}, {"gfx803"},  GK_GFX803,  FEATURE_FAST_DENORMAL_F32},
+  {{"gfx810"},    {"gfx810"},  GK_GFX810,  FEATURE_FAST_DENORMAL_F32},
+  {{"stoney"},    {"gfx810"},  GK_GFX810,  FEATURE_FAST_DENORMAL_F32},
+  {{"gfx900"},    {"gfx900"},  GK_GFX900,  FEATURE_FAST_FMA_F32|FEATURE_FAST_DENORMAL_F32},
+  {{"gfx902"},    {"gfx902"},  GK_GFX902,  FEATURE_FAST_FMA_F32|FEATURE_FAST_DENORMAL_F32},
+  {{"gfx904"},    {"gfx904"},  GK_GFX904,  FEATURE_FAST_FMA_F32|FEATURE_FAST_DENORMAL_F32},
+  {{"gfx906"},    {"gfx906"},  GK_GFX906,  FEATURE_FAST_FMA_F32|FEATURE_FAST_DENORMAL_F32},
+};
+
+const GPUInfo *getArchEntry(AMDGPU::GPUKind AK, ArrayRef<GPUInfo> Table) {
+  GPUInfo Search = { {""}, {""}, AK, AMDGPU::FEATURE_NONE };
+
+  auto I = std::lower_bound(Table.begin(), Table.end(), Search,
+    [](const GPUInfo &A, const GPUInfo &B) {
+      return A.Kind < B.Kind;
+    });
+
+  if (I == Table.end())
+    return nullptr;
+  return I;
+}
+
+} // namespace
+
+StringRef llvm::AMDGPU::getArchNameAMDGCN(GPUKind AK) {
+  if (const auto *Entry = getArchEntry(AK, AMDGCNGPUs))
+    return Entry->CanonicalName;
+  return "";
+}
+
+StringRef llvm::AMDGPU::getArchNameR600(GPUKind AK) {
+  if (const auto *Entry = getArchEntry(AK, R600GPUs))
+    return Entry->CanonicalName;
+  return "";
+}
+
+AMDGPU::GPUKind llvm::AMDGPU::parseArchAMDGCN(StringRef CPU) {
+  for (const auto C : AMDGCNGPUs) {
+    if (CPU == C.Name)
+      return C.Kind;
+  }
+
+  return AMDGPU::GPUKind::GK_NONE;
+}
+
+AMDGPU::GPUKind llvm::AMDGPU::parseArchR600(StringRef CPU) {
+  for (const auto C : R600GPUs) {
+    if (CPU == C.Name)
+      return C.Kind;
+  }
+
+  return AMDGPU::GPUKind::GK_NONE;
+}
+
+unsigned AMDGPU::getArchAttrAMDGCN(GPUKind AK) {
+  if (const auto *Entry = getArchEntry(AK, AMDGCNGPUs))
+    return Entry->Features;
+  return FEATURE_NONE;
+}
+
+unsigned AMDGPU::getArchAttrR600(GPUKind AK) {
+  if (const auto *Entry = getArchEntry(AK, R600GPUs))
+    return Entry->Features;
+  return FEATURE_NONE;
+}
+
+void AMDGPU::fillValidArchListAMDGCN(SmallVectorImpl<StringRef> &Values) {
+  // XXX: Should this only report unique canonical names?
+  for (const auto C : AMDGCNGPUs)
+    Values.push_back(C.Name);
+}
+
+void AMDGPU::fillValidArchListR600(SmallVectorImpl<StringRef> &Values) {
+  for (const auto C : R600GPUs)
+    Values.push_back(C.Name);
+}
+
+StringRef AMDGPU::getArchNameFromElfMach(unsigned ElfMach) {
+  AMDGPU::GPUKind AK;
+
+  switch (ElfMach) {
+  case ELF::EF_AMDGPU_MACH_R600_R600:     AK = GK_R600;    break;
+  case ELF::EF_AMDGPU_MACH_R600_R630:     AK = GK_R630;    break;
+  case ELF::EF_AMDGPU_MACH_R600_RS880:    AK = GK_RS880;   break;
+  case ELF::EF_AMDGPU_MACH_R600_RV670:    AK = GK_RV670;   break;
+  case ELF::EF_AMDGPU_MACH_R600_RV710:    AK = GK_RV710;   break;
+  case ELF::EF_AMDGPU_MACH_R600_RV730:    AK = GK_RV730;   break;
+  case ELF::EF_AMDGPU_MACH_R600_RV770:    AK = GK_RV770;   break;
+  case ELF::EF_AMDGPU_MACH_R600_CEDAR:    AK = GK_CEDAR;   break;
+  case ELF::EF_AMDGPU_MACH_R600_CYPRESS:  AK = GK_CYPRESS; break;
+  case ELF::EF_AMDGPU_MACH_R600_JUNIPER:  AK = GK_JUNIPER; break;
+  case ELF::EF_AMDGPU_MACH_R600_REDWOOD:  AK = GK_REDWOOD; break;
+  case ELF::EF_AMDGPU_MACH_R600_SUMO:     AK = GK_SUMO;    break;
+  case ELF::EF_AMDGPU_MACH_R600_BARTS:    AK = GK_BARTS;   break;
+  case ELF::EF_AMDGPU_MACH_R600_CAICOS:   AK = GK_CAICOS;  break;
+  case ELF::EF_AMDGPU_MACH_R600_CAYMAN:   AK = GK_CAYMAN;  break;
+  case ELF::EF_AMDGPU_MACH_R600_TURKS:    AK = GK_TURKS;   break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX600: AK = GK_GFX600;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX601: AK = GK_GFX601;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX700: AK = GK_GFX700;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX701: AK = GK_GFX701;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX702: AK = GK_GFX702;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX703: AK = GK_GFX703;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX704: AK = GK_GFX704;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX801: AK = GK_GFX801;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX802: AK = GK_GFX802;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX803: AK = GK_GFX803;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX810: AK = GK_GFX810;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX900: AK = GK_GFX900;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX902: AK = GK_GFX902;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX904: AK = GK_GFX904;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX906: AK = GK_GFX906;  break;
+  case ELF::EF_AMDGPU_MACH_NONE:          AK = GK_NONE;    break;
+  }
+
+  StringRef GPUName = getArchNameAMDGCN(AK);
+  if (GPUName != "")
+    return GPUName;
+  return getArchNameR600(AK);
+}
+
+unsigned AMDGPU::getElfMach(StringRef GPU) {
+  AMDGPU::GPUKind AK = parseArchAMDGCN(GPU);
+  if (AK == AMDGPU::GPUKind::GK_NONE)
+    AK = parseArchR600(GPU);
+
+  switch (AK) {
+  case GK_R600:    return ELF::EF_AMDGPU_MACH_R600_R600;
+  case GK_R630:    return ELF::EF_AMDGPU_MACH_R600_R630;
+  case GK_RS880:   return ELF::EF_AMDGPU_MACH_R600_RS880;
+  case GK_RV670:   return ELF::EF_AMDGPU_MACH_R600_RV670;
+  case GK_RV710:   return ELF::EF_AMDGPU_MACH_R600_RV710;
+  case GK_RV730:   return ELF::EF_AMDGPU_MACH_R600_RV730;
+  case GK_RV770:   return ELF::EF_AMDGPU_MACH_R600_RV770;
+  case GK_CEDAR:   return ELF::EF_AMDGPU_MACH_R600_CEDAR;
+  case GK_CYPRESS: return ELF::EF_AMDGPU_MACH_R600_CYPRESS;
+  case GK_JUNIPER: return ELF::EF_AMDGPU_MACH_R600_JUNIPER;
+  case GK_REDWOOD: return ELF::EF_AMDGPU_MACH_R600_REDWOOD;
+  case GK_SUMO:    return ELF::EF_AMDGPU_MACH_R600_SUMO;
+  case GK_BARTS:   return ELF::EF_AMDGPU_MACH_R600_BARTS;
+  case GK_CAICOS:  return ELF::EF_AMDGPU_MACH_R600_CAICOS;
+  case GK_CAYMAN:  return ELF::EF_AMDGPU_MACH_R600_CAYMAN;
+  case GK_TURKS:   return ELF::EF_AMDGPU_MACH_R600_TURKS;
+  case GK_GFX600:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX600;
+  case GK_GFX601:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX601;
+  case GK_GFX700:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX700;
+  case GK_GFX701:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX701;
+  case GK_GFX702:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX702;
+  case GK_GFX703:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX703;
+  case GK_GFX704:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX704;
+  case GK_GFX801:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX801;
+  case GK_GFX802:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX802;
+  case GK_GFX803:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX803;
+  case GK_GFX810:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX810;
+  case GK_GFX900:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX900;
+  case GK_GFX902:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX902;
+  case GK_GFX904:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX904;
+  case GK_GFX906:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX906;
+  case GK_NONE:    return ELF::EF_AMDGPU_MACH_NONE;
+  }
+
+  llvm_unreachable("unknown GPU");
+}
+
+AMDGPU::IsaVersion AMDGPU::getIsaVersion(StringRef GPU) {
+  if (GPU == "generic")
+    return {7, 0, 0};
+
+  AMDGPU::GPUKind AK = parseArchAMDGCN(GPU);
+  if (AK == AMDGPU::GPUKind::GK_NONE)
+    return {0, 0, 0};
+
+  switch (AK) {
+  case GK_GFX600: return {6, 0, 0};
+  case GK_GFX601: return {6, 0, 1};
+  case GK_GFX700: return {7, 0, 0};
+  case GK_GFX701: return {7, 0, 1};
+  case GK_GFX702: return {7, 0, 2};
+  case GK_GFX703: return {7, 0, 3};
+  case GK_GFX704: return {7, 0, 4};
+  case GK_GFX801: return {8, 0, 1};
+  case GK_GFX802: return {8, 0, 2};
+  case GK_GFX803: return {8, 0, 3};
+  case GK_GFX810: return {8, 1, 0};
+  case GK_GFX900: return {9, 0, 0};
+  case GK_GFX902: return {9, 0, 2};
+  case GK_GFX904: return {9, 0, 4};
+  case GK_GFX906: return {9, 0, 6};
+  default:        return {0, 0, 0};
+  }
 }

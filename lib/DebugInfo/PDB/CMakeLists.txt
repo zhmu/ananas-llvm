@@ -14,13 +14,17 @@ if(LLVM_ENABLE_DIA_SDK)
   add_pdb_impl_folder(DIA
     DIA/DIADataStream.cpp
     DIA/DIAEnumDebugStreams.cpp
+    DIA/DIAEnumInjectedSources.cpp
     DIA/DIAEnumLineNumbers.cpp
+    DIA/DIAEnumSectionContribs.cpp
     DIA/DIAEnumSourceFiles.cpp
     DIA/DIAEnumSymbols.cpp
     DIA/DIAEnumTables.cpp
     DIA/DIAError.cpp
+    DIA/DIAInjectedSource.cpp
     DIA/DIALineNumber.cpp
     DIA/DIARawSymbol.cpp
+    DIA/DIASectionContrib.cpp
     DIA/DIASession.cpp
     DIA/DIASourceFile.cpp
     DIA/DIATable.cpp
@@ -42,13 +46,14 @@ add_pdb_impl_folder(Native
   Native/InfoStream.cpp
   Native/InfoStreamBuilder.cpp
   Native/ModuleDebugStream.cpp
-  Native/NativeBuiltinSymbol.cpp
   Native/NativeCompilandSymbol.cpp
   Native/NativeEnumModules.cpp
-  Native/NativeEnumSymbol.cpp
   Native/NativeEnumTypes.cpp
   Native/NativeExeSymbol.cpp
   Native/NativeRawSymbol.cpp
+  Native/NativeTypeBuiltin.cpp
+  Native/NativeTypeEnum.cpp
+  Native/NativeTypePointer.cpp
   Native/NamedStreamMap.cpp
   Native/NativeSession.cpp
   Native/PDBFile.cpp
@@ -58,10 +63,12 @@ add_pdb_impl_folder(Native
   Native/PublicsStream.cpp
   Native/GSIStreamBuilder.cpp
   Native/RawError.cpp
+  Native/SymbolCache.cpp
   Native/SymbolStream.cpp
   Native/TpiHashing.cpp
   Native/TpiStream.cpp
-  Native/TpiStreamBuilder.cpp)
+  Native/TpiStreamBuilder.cpp
+  )
 
 list(APPEND LIBPDB_ADDITIONAL_HEADER_DIRS "${LLVM_MAIN_INCLUDE_DIR}/llvm/DebugInfo/PDB/Native")
 list(APPEND LIBPDB_ADDITIONAL_HEADER_DIRS "${LLVM_MAIN_INCLUDE_DIR}/llvm/DebugInfo/PDB")

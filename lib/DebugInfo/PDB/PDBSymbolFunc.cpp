@@ -82,12 +82,6 @@ private:
 };
 }
 
-PDBSymbolFunc::PDBSymbolFunc(const IPDBSession &PDBSession,
-                             std::unique_ptr<IPDBRawSymbol> Symbol)
-    : PDBSymbol(PDBSession, std::move(Symbol)) {
-  assert(RawSymbol->getSymTag() == PDB_SymType::Function);
-}
-
 std::unique_ptr<IPDBEnumChildren<PDBSymbolData>>
 PDBSymbolFunc::getArguments() const {
   return llvm::make_unique<FunctionArgEnumerator>(Session, *this);
@@ -104,4 +98,19 @@ bool PDBSymbolFunc::isDestructor() const {
   if (Name == "__vecDelDtor")
     return true;
   return false;
+}
+
+std::unique_ptr<IPDBEnumLineNumbers> PDBSymbolFunc::getLineNumbers() const {
+  auto Len = RawSymbol->getLength();
+  return Session.findLineNumbersByAddress(RawSymbol->getVirtualAddress(),
+                                          Len ? Len : 1);
+}
+
+uint32_t PDBSymbolFunc::getCompilandId() const {
+  if (auto Lines = getLineNumbers()) {
+    if (auto FirstLine = Lines->getNext()) {
+      return FirstLine->getCompilandId();
+    }
+  }
+  return 0;
 }
